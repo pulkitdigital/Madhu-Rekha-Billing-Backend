@@ -2,7 +2,8 @@
 import express from "express";
 import cors from "cors";
 import "dotenv/config";
-import puppeteer from "puppeteer";
+// import puppeteer from "puppeteer";
+import PDFDocument from "pdfkit";
 import path from "path";
 import { fileURLToPath } from "url";
 import { db } from "./firebaseClient.js";
@@ -524,50 +525,212 @@ app.get("/api/payments/:id", async (req, res) => {
 });
 
 // ---------- PDF: Invoice ----------
+// app.get("/api/bills/:id/invoice-html-pdf", async (req, res) => {
+//   const id = req.params.id;
+//   if (!id) return res.status(400).json({ error: "Invalid bill id" });
+
+//   try {
+//     const billRef = db.collection("bills").doc(id);
+//     const billSnap = await billRef.get();
+//     if (!billSnap.exists) {
+//       return res.status(404).json({ error: "Bill not found" });
+//     }
+
+//     const browser = await puppeteer.launch({
+//       headless: "new",
+//       args: ["--no-sandbox", "--disable-setuid-sandbox"],
+//     });
+//     const page = await browser.newPage();
+
+//     const url = `${FRONTEND_BASE}/print/invoice/${id}`;
+//     console.log("Generating invoice PDF from URL:", url);
+
+//     await page.goto(url, { waitUntil: "domcontentloaded", timeout: 60000 });
+//     await page.waitForSelector("[data-print-ready='1']", { timeout: 60000 });
+
+//     const pdfBuffer = await page.pdf({
+//       format: "A4",
+//       printBackground: true,
+//       preferCSSPageSize: false,
+//       margin: {
+//         top: "5mm",
+//         bottom: "5mm",
+//         left: "5mm",
+//         right: "5mm",
+//       },
+//       pageRanges: "1",
+//     });
+
+//     await browser.close();
+
+//     res.setHeader("Content-Type", "application/pdf");
+//     res.setHeader(
+//       "Content-Disposition",
+//       `inline; filename="invoice-${id}.pdf"`
+//     );
+//     res.end(pdfBuffer);
+//   } catch (err) {
+//     console.error("invoice-html-pdf error:", err);
+//     if (!res.headersSent) {
+//       res.status(500).json({ error: "Failed to generate invoice PDF" });
+//     }
+//   }
+// });
+
+// ---------- PDF: Invoice (PDFKit) ----------
 app.get("/api/bills/:id/invoice-html-pdf", async (req, res) => {
   const id = req.params.id;
   if (!id) return res.status(400).json({ error: "Invalid bill id" });
 
   try {
+    // Load bill
     const billRef = db.collection("bills").doc(id);
     const billSnap = await billRef.get();
     if (!billSnap.exists) {
       return res.status(404).json({ error: "Bill not found" });
     }
+    const bill = billSnap.data();
 
-    const browser = await puppeteer.launch({
-      headless: "new",
-      args: ["--no-sandbox", "--disable-setuid-sandbox"],
-    });
-    const page = await browser.newPage();
+    // Load items
+    const itemsSnap = await db
+      .collection("items")
+      .where("billId", "==", id)
+      .get();
 
-    const url = `${FRONTEND_BASE}/print/invoice/${id}`;
-    console.log("Generating invoice PDF from URL:", url);
+    const items = itemsSnap.docs.map((doc) => doc.data());
 
-    await page.goto(url, { waitUntil: "domcontentloaded", timeout: 60000 });
-    await page.waitForSelector("[data-print-ready='1']", { timeout: 60000 });
-
-    const pdfBuffer = await page.pdf({
-      format: "A4",
-      printBackground: true,
-      preferCSSPageSize: false,
-      margin: {
-        top: "5mm",
-        bottom: "5mm",
-        left: "5mm",
-        right: "5mm",
-      },
-      pageRanges: "1",
-    });
-
-    await browser.close();
-
+    // Prepare response headers
     res.setHeader("Content-Type", "application/pdf");
     res.setHeader(
       "Content-Disposition",
       `inline; filename="invoice-${id}.pdf"`
     );
-    res.end(pdfBuffer);
+
+    // Create PDF
+    const doc = new PDFDocument({
+      size: "A4",
+      margin: 36, // 0.5 inch
+    });
+
+    doc.pipe(res);
+
+    // ---------- HEADER ----------
+    doc
+      .fontSize(18)
+      .text("MADHU REKHA EYE CARE", { align: "center" })
+      .moveDown(0.3);
+
+    doc
+      .fontSize(12)
+      .text("Invoice", { align: "center" })
+      .moveDown(1);
+
+    // ---------- BILL INFO ----------
+    doc
+      .fontSize(10)
+      .text(`Invoice No: ${bill.invoiceNo || id}`)
+      .text(`Date: ${bill.date || ""}`)
+      .moveDown(0.5);
+
+    // Patient details
+    doc
+      .fontSize(10)
+      .text(`Patient Name: ${bill.patientName || ""}`)
+      .text(`Age: ${bill.age ?? ""}`)
+      .text(`Address: ${bill.address || ""}`)
+      .moveDown(0.5);
+
+    if (bill.doctorReg1) doc.text(`Doctor Reg No 1: ${bill.doctorReg1}`);
+    if (bill.doctorReg2) doc.text(`Doctor Reg No 2: ${bill.doctorReg2}`);
+    doc.moveDown(1);
+
+    // ---------- ITEMS TABLE ----------
+    const tableTop = doc.y;
+
+    const colDescX = 36;
+    const colQtyX = 280;
+    const colRateX = 330;
+    const colAmountX = 400;
+
+    doc.fontSize(10).text("Description", colDescX, tableTop);
+    doc.text("Qty", colQtyX, tableTop);
+    doc.text("Rate", colRateX, tableTop);
+    doc.text("Amount", colAmountX, tableTop);
+
+    doc
+      .moveTo(36, tableTop + 12)
+      .lineTo(559, tableTop + 12)
+      .stroke();
+
+    let y = tableTop + 18;
+
+    items.forEach((item) => {
+      const qty = Number(item.qty || 0);
+      const rate = Number(item.rate || 0);
+      const amount = Number(item.amount || qty * rate);
+
+      doc.text(item.description || "", colDescX, y, { width: 230 });
+      doc.text(qty.toString(), colQtyX, y);
+      doc.text(rate.toFixed(2), colRateX, y);
+      doc.text(amount.toFixed(2), colAmountX, y);
+
+      y += 16;
+
+      // simple page break handling
+      if (y > 750) {
+        doc.addPage();
+        y = 36;
+      }
+    });
+
+    doc.moveDown(1.5);
+
+    // ---------- TOTALS ----------
+    const subtotal = Number(bill.subtotal || 0);
+    const adjust = Number(bill.adjust || 0);
+    const total = Number(bill.total || 0);
+    const paid = Number(bill.paid || 0);
+    const balance = Number(bill.balance || 0);
+
+    const totalsX = 330;
+
+    doc
+      .fontSize(10)
+      .text(`Subtotal:`, totalsX, doc.y)
+      .text(subtotal.toFixed(2), totalsX + 100, doc.y - 12, { align: "right" });
+
+    doc
+      .text(`Adjustment:`, totalsX, doc.y)
+      .text(adjust.toFixed(2), totalsX + 100, doc.y - 12, { align: "right" });
+
+    doc
+      .font("Helvetica-Bold")
+      .text(`Total:`, totalsX, doc.y)
+      .text(total.toFixed(2), totalsX + 100, doc.y - 12, { align: "right" });
+
+    doc
+      .font("Helvetica")
+      .text(`Paid:`, totalsX, doc.y)
+      .text(paid.toFixed(2), totalsX + 100, doc.y - 12, { align: "right" });
+
+    doc
+      .font("Helvetica-Bold")
+      .text(`Balance:`, totalsX, doc.y)
+      .text(balance.toFixed(2), totalsX + 100, doc.y - 12, {
+        align: "right",
+      });
+
+    doc.moveDown(2);
+
+    // ---------- FOOTER ----------
+    doc
+      .fontSize(9)
+      .font("Helvetica-Oblique")
+      .text("This is a computer-generated invoice.", {
+        align: "center",
+      });
+
+    doc.end();
   } catch (err) {
     console.error("invoice-html-pdf error:", err);
     if (!res.headersSent) {
@@ -576,53 +739,214 @@ app.get("/api/bills/:id/invoice-html-pdf", async (req, res) => {
   }
 });
 
+
 // ---------- PDF: Receipt ----------
+// app.get("/api/payments/:id/receipt-html-pdf", async (req, res) => {
+//   const id = req.params.id;
+//   if (!id) return res.status(400).json({ error: "Invalid payment id" });
+
+//   try {
+//     const paymentRef = db.collection("payments").doc(id);
+//     const paymentSnap = await paymentRef.get();
+//     if (!paymentSnap.exists) {
+//       return res.status(404).json({ error: "Payment not found" });
+//     }
+
+//     const browser = await puppeteer.launch({
+//       headless: "new",
+//       args: ["--no-sandbox", "--disable-setuid-sandbox"],
+//     });
+//     const page = await browser.newPage();
+
+//     const url = `${FRONTEND_BASE}/print/receipt/${id}`;
+//     console.log("Generating receipt PDF from URL:", url);
+
+//     await page.goto(url, { waitUntil: "domcontentloaded", timeout: 60000 });
+//     await page.waitForSelector("[data-print-ready='1']", { timeout: 60000 });
+
+//     const pdfBuffer = await page.pdf({
+//       width: "210mm",
+//       height: "148mm",
+//       printBackground: true,
+//       preferCSSPageSize: false,
+//       margin: {
+//         top: "3mm",
+//         bottom: "3mm",
+//         left: "3mm",
+//         right: "3mm",
+//       },
+//       pageRanges: "1",
+//       scale: 0.95,
+//     });
+
+//     await browser.close();
+
+//     res.setHeader("Content-Type", "application/pdf");
+//     res.setHeader(
+//       "Content-Disposition",
+//       `inline; filename="receipt-${id}.pdf"`
+//     );
+//     res.end(pdfBuffer);
+//   } catch (err) {
+//     console.error("receipt-html-pdf error:", err);
+//     if (!res.headersSent) {
+//       res.status(500).json({ error: "Failed to generate receipt PDF" });
+//     }
+//   }
+// });
+
+// ---------- PDF: Receipt (PDFKit) ----------
 app.get("/api/payments/:id/receipt-html-pdf", async (req, res) => {
   const id = req.params.id;
   if (!id) return res.status(400).json({ error: "Invalid payment id" });
 
   try {
+    // 1) Load this payment
     const paymentRef = db.collection("payments").doc(id);
     const paymentSnap = await paymentRef.get();
     if (!paymentSnap.exists) {
       return res.status(404).json({ error: "Payment not found" });
     }
+    const payment = paymentSnap.data();
+    const billId = payment.billId;
 
-    const browser = await puppeteer.launch({
-      headless: "new",
-      args: ["--no-sandbox", "--disable-setuid-sandbox"],
-    });
-    const page = await browser.newPage();
+    // 2) Load bill
+    const billRef = db.collection("bills").doc(billId);
+    const billSnap = await billRef.get();
+    if (!billSnap.exists) {
+      return res.status(404).json({ error: "Bill not found" });
+    }
+    const bill = billSnap.data();
 
-    const url = `${FRONTEND_BASE}/print/receipt/${id}`;
-    console.log("Generating receipt PDF from URL:", url);
+    // 3) Load all payments for this bill to compute cumulative paid & balance
+    const paysSnap = await db
+      .collection("payments")
+      .where("billId", "==", billId)
+      .get();
 
-    await page.goto(url, { waitUntil: "domcontentloaded", timeout: 60000 });
-    await page.waitForSelector("[data-print-ready='1']", { timeout: 60000 });
+    const billTotal = Number(bill.total || 0);
 
-    const pdfBuffer = await page.pdf({
-      width: "210mm",
-      height: "148mm",
-      printBackground: true,
-      preferCSSPageSize: false,
-      margin: {
-        top: "3mm",
-        bottom: "3mm",
-        left: "3mm",
-        right: "3mm",
-      },
-      pageRanges: "1",
-      scale: 0.95,
-    });
+    const allPayments = paysSnap.docs
+      .map((doc) => {
+        const d = doc.data();
+        const paymentDateTime =
+          d.paymentDateTime ||
+          (d.paymentDate ? `${d.paymentDate}T00:00:00.000Z` : null);
+        return {
+          id: doc.id,
+          paymentDateTime,
+          amount: Number(d.amount || 0),
+        };
+      })
+      .sort((a, b) => {
+        const da = a.paymentDateTime ? new Date(a.paymentDateTime) : new Date(0);
+        const dbb = b.paymentDateTime ? new Date(b.paymentDateTime) : new Date(0);
+        return da - dbb;
+      });
 
-    await browser.close();
+    let cumulativePaid = 0;
+    let paidTillThis = 0;
+    let balanceAfterThis = billTotal;
 
+    for (const p of allPayments) {
+      cumulativePaid += p.amount;
+      if (p.id === id) {
+        paidTillThis = cumulativePaid;
+        balanceAfterThis = billTotal - paidTillThis;
+        break;
+      }
+    }
+
+    const receiptNo =
+      payment.receiptNo || `R-${String(id).padStart(4, "0")}`;
+
+    // ---------- PDF OUTPUT ----------
     res.setHeader("Content-Type", "application/pdf");
     res.setHeader(
       "Content-Disposition",
       `inline; filename="receipt-${id}.pdf"`
     );
-    res.end(pdfBuffer);
+
+    const doc = new PDFDocument({
+      size: [595.28, 420], // approx A5 landscape in points
+      margin: 28,
+    });
+
+    doc.pipe(res);
+
+    // HEADER
+    doc
+      .fontSize(16)
+      .text("MADHU REKHA EYE CARE", { align: "center" })
+      .moveDown(0.3);
+
+    doc.fontSize(12).text("Payment Receipt", { align: "center" }).moveDown(1);
+
+    // RECEIPT INFO
+    doc
+      .fontSize(10)
+      .text(`Receipt No: ${receiptNo}`)
+      .text(`Receipt Date: ${payment.paymentDate || ""}`)
+      .moveDown(0.5);
+
+    // PATIENT / BILL INFO
+    doc
+      .fontSize(10)
+      .text(`Bill No: ${bill.invoiceNo || billId}`)
+      .text(`Bill Date: ${bill.date || ""}`)
+      .moveDown(0.5);
+
+    doc
+      .text(`Patient Name: ${bill.patientName || ""}`)
+      .text(`Age: ${bill.age ?? ""}`)
+      .text(`Address: ${bill.address || ""}`)
+      .moveDown(0.5);
+
+    if (bill.doctorReg1) doc.text(`Doctor Reg No 1: ${bill.doctorReg1}`);
+    if (bill.doctorReg2) doc.text(`Doctor Reg No 2: ${bill.doctorReg2}`);
+    doc.moveDown(1);
+
+    // PAYMENT DETAILS
+    doc
+      .fontSize(10)
+      .text(`Amount Received: Rs. ${Number(payment.amount || 0).toFixed(2)}`)
+      .text(`Mode: ${payment.mode || "Cash"}`);
+
+    if (payment.referenceNo) {
+      doc.text(`Reference No: ${payment.referenceNo}`);
+    }
+
+    if (payment.drawnOn) {
+      doc.text(`Drawn On: ${payment.drawnOn}`);
+    }
+
+    if (payment.drawnAs) {
+      doc.text(`Drawn As: ${payment.drawnAs}`);
+    }
+
+    doc.moveDown(1);
+
+    // BILL SUMMARY AFTER THIS PAYMENT
+    doc
+      .fontSize(10)
+      .text(`Bill Total: Rs. ${billTotal.toFixed(2)}`)
+      .text(`Total Paid (till this receipt): Rs. ${paidTillThis.toFixed(2)}`)
+      .font("Helvetica-Bold")
+      .text(
+        `Balance After This Payment: Rs. ${balanceAfterThis.toFixed(2)}`
+      )
+      .font("Helvetica")
+      .moveDown(2);
+
+    // FOOTER
+    doc
+      .fontSize(9)
+      .font("Helvetica-Oblique")
+      .text("This is a computer-generated receipt.", {
+        align: "center",
+      });
+
+    doc.end();
   } catch (err) {
     console.error("receipt-html-pdf error:", err);
     if (!res.headersSent) {
@@ -630,6 +954,7 @@ app.get("/api/payments/:id/receipt-html-pdf", async (req, res) => {
     }
   }
 });
+
 
 // ---------- START SERVER ----------
 app.listen(PORT, () => {
