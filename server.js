@@ -381,10 +381,8 @@ app.post("/api/bills", async (req, res) => {
       invoiceNo: invoiceNo,
       patientName,
       address,
-      age,
+      age: age ? Number(age) : null,
       date: jsDate,
-      doctorReg1,
-      doctorReg2,
       subtotal,
       adjust: adj,
       total,
@@ -392,6 +390,7 @@ app.post("/api/bills", async (req, res) => {
       refunded,
       balance,
       status,
+      sex: sex || null,
     });
 
     syncItemsToSheet(billId, billId, patientName, itemsData);
@@ -693,7 +692,7 @@ app.post("/api/bills/:id/payments", async (req, res) => {
     );
 
     res.status(201).json({
-      id: paymentId,   
+      id: paymentId,
       ...paymentDoc,
     });
   } catch (err) {
@@ -758,9 +757,9 @@ app.post("/api/bills/:id/refunds", async (req, res) => {
     const refundTime = now.toTimeString().slice(0, 5);
     const refundDateTime = now.toISOString();
     const invoiceNo = bill.invoiceNo || billId;
-const refundReceiptNo = await generateRefundId(invoiceNo);      // 25-26/INV-0001/REF-0001
-const refundId = refundReceiptNo.replace(/\//g, "_");           // 25-26_INV-0001_REF-0001
-const refundRef = db.collection("refunds").doc(refundId);
+    const refundReceiptNo = await generateRefundId(invoiceNo); // 25-26/INV-0001/REF-0001
+    const refundId = refundReceiptNo.replace(/\//g, "_"); // 25-26_INV-0001_REF-0001
+    const refundRef = db.collection("refunds").doc(refundId);
 
     const refundDoc = {
       billId,
@@ -807,7 +806,12 @@ const refundRef = db.collection("refunds").doc(refundId);
     cache.flushAll();
 
     syncRefundToSheet(
-      { id: refundRef.id, ...refundDoc },
+      {
+        id: refundRef.id,
+        ...refundDoc,
+        netPaidAfterThis: effectivePaid,
+        balanceAfterThis: newBalance,
+      },
       { id: billId, invoiceNo: bill.invoiceNo, patientName: bill.patientName }
     );
 
@@ -2864,7 +2868,6 @@ app.get("/api/bills/:id/summary-pdf", async (req, res) => {
   }
 });
 
-
 // ---------- PUT /api/bills/:id (edit bill: patient + services, NOT payments) ----------
 app.put("/api/bills/:id", async (req, res) => {
   const billId = req.params.id;
@@ -2894,7 +2897,8 @@ app.put("/api/bills/:id", async (req, res) => {
       services,
     } = req.body;
 
-    const jsDate = date || oldBill.date || new Date().toISOString().slice(0, 10);
+    const jsDate =
+      date || oldBill.date || new Date().toISOString().slice(0, 10);
 
     // --- NORMALIZE SERVICES (same style as POST /api/bills) ---
     const normalizedServices = Array.isArray(services)
@@ -2925,7 +2929,10 @@ app.put("/api/bills/:id", async (req, res) => {
       };
     });
 
-    const subtotal = itemsData.reduce((sum, it) => sum + Number(it.amount || 0), 0);
+    const subtotal = itemsData.reduce(
+      (sum, it) => sum + Number(it.amount || 0),
+      0
+    );
     const adj = Number(adjust ?? oldBill.adjust ?? 0) || 0;
     const total = subtotal + adj;
 
@@ -2954,7 +2961,8 @@ app.put("/api/bills/:id", async (req, res) => {
       refunded,
       balance,
       status,
-      remarks: typeof remarks !== "undefined" ? remarks : oldBill.remarks ?? null,
+      remarks:
+        typeof remarks !== "undefined" ? remarks : oldBill.remarks ?? null,
       services: normalizedServices,
     });
 
@@ -2989,8 +2997,6 @@ app.put("/api/bills/:id", async (req, res) => {
       address: address ?? oldBill.address ?? "",
       age: typeof age !== "undefined" ? Number(age) : oldBill.age ?? null,
       date: jsDate,
-      doctorReg1: doctorReg1 ?? oldBill.doctorReg1 ?? null,
-      doctorReg2: doctorReg2 ?? oldBill.doctorReg2 ?? null,
       subtotal,
       adjust: adj,
       total,
@@ -2998,9 +3004,15 @@ app.put("/api/bills/:id", async (req, res) => {
       refunded,
       balance,
       status,
+      sex: sex ?? oldBill.sex ?? null,
     });
 
-    syncItemsToSheet(billId, billId, patientName ?? oldBill.patientName ?? "", itemsData);
+    syncItemsToSheet(
+      billId,
+      billId,
+      patientName ?? oldBill.patientName ?? "",
+      itemsData
+    );
 
     res.json({
       id: billId,
@@ -3017,7 +3029,8 @@ app.put("/api/bills/:id", async (req, res) => {
       refunded,
       balance,
       status,
-      remarks: typeof remarks !== "undefined" ? remarks : oldBill.remarks ?? null,
+      remarks:
+        typeof remarks !== "undefined" ? remarks : oldBill.remarks ?? null,
       services: normalizedServices,
     });
   } catch (err) {
@@ -3025,7 +3038,6 @@ app.put("/api/bills/:id", async (req, res) => {
     res.status(500).json({ error: "Failed to update bill" });
   }
 });
-
 
 // ---------- START SERVER ----------
 app.listen(PORT, () => {
