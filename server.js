@@ -61,47 +61,73 @@ function computeStatus(total, paidEffective) {
   return "PENDING";
 }
 
-async function generateReceiptNumber() {
-  const now = Date.now();
-  const random = Math.floor(Math.random() * 1000);
-  const suffix = `${String(now).slice(-6)}${String(random).padStart(3, "0")}`;
-  return `RCP-${suffix}`;
-}
+// --------- ID HELPERS (FINANCIAL YEAR + SEQUENCES) ----------
 
-async function generateRefundNumber() {
-  const now = Date.now();
-  const random = Math.floor(Math.random() * 1000);
-  const suffix = `${String(now).slice(-6)}${String(random).padStart(3, "0")}`;
-  return `RFD-${suffix}`;
-}
-
-function formatDateYYYYMMDD(dateStrOrDate) {
+// Returns "25-26" for FY 2025-26 based on Indian FY (Apr–Mar)
+function getFinancialYearCode(dateStrOrDate) {
   const d = dateStrOrDate ? new Date(dateStrOrDate) : new Date();
-  const yyyy = d.getFullYear();
-  const mm = String(d.getMonth() + 1).padStart(2, "0");
-  const dd = String(d.getDate()).padStart(2, "0");
-  return `${yyyy}${mm}${dd}`;
+  let year = d.getFullYear();
+  const month = d.getMonth() + 1; // 1-12
+
+  // Indian FY: if month < April, FY starts previous year
+  let fyStart = month >= 4 ? year : year - 1;
+  let fyEnd = fyStart + 1;
+
+  const fyStartShort = String(fyStart).slice(-2);
+  const fyEndShort = String(fyEnd).slice(-2);
+  return `${fyStartShort}-${fyEndShort}`; // e.g., "25-26"
 }
 
-// Turn "Rohit Sharma" => "ROHITSHAR"
-function makeNameSlug(name) {
-  if (!name) return "NONAME";
-  const slug = name
-    .toUpperCase()
-    .replace(/[^A-Z]/g, "")
-    .slice(0, 8);
-  return slug || "NONAME";
+// Get next sequence number from Firestore counters doc, safely
+async function getNextSequence(key) {
+  const ref = db.collection("counters").doc(key);
+  const nextSeq = await db.runTransaction(async (tx) => {
+    const snap = await tx.get(ref);
+    const current = snap.exists ? Number(snap.data().seq || 0) : 0;
+    const updated = current + 1;
+    tx.set(ref, { seq: updated }, { merge: true });
+    return updated;
+  });
+  return nextSeq;
 }
 
-// Bill id + invoiceNo: INV-YYYYMMDD-HHMMSS-NAME
-function generateBillId(patientName, billDateInput) {
-  const datePart = formatDateYYYYMMDD(billDateInput);
-  const now = new Date();
-  const timePart = `${String(now.getHours()).padStart(2, "0")}${String(
-    now.getMinutes()
-  ).padStart(2, "0")}${String(now.getSeconds()).padStart(2, "0")}`;
-  const nameSlug = makeNameSlug(patientName);
-  return `INV-${datePart}-${timePart}-${nameSlug}`;
+// Generate invoice number: "25-26/INV-0001"
+async function generateInvoiceNumber(billDateInput) {
+  const dateStr = billDateInput || new Date().toISOString().slice(0, 10);
+  const fy = getFinancialYearCode(dateStr);
+  const seq = await getNextSequence(`invoice-${fy}`);
+  const serial = String(seq).padStart(4, "0");
+  const invoiceNo = `${fy}/INV-${serial}`; // e.g. "25-26/INV-0001"
+
+  return { invoiceNo, fy, serial };
+}
+
+// Parse "25-26/INV-0001" into { fy: "25-26", invoiceSerial: "0001" }
+function parseInvoiceNumber(invoiceNo) {
+  // expecting "25-26/INV-0001"
+  const [fy, rest] = (invoiceNo || "").split("/");
+  if (!fy || !rest) {
+    return { fy: "00-00", invoiceSerial: "0000" };
+  }
+  const parts = rest.split("-");
+  const invoiceSerial = parts[1] || "0000";
+  return { fy, invoiceSerial };
+}
+
+// Generate receipt id: "25-26/INV-0001/Rec-0001"
+async function generateReceiptId(invoiceNo) {
+  const { fy, invoiceSerial } = parseInvoiceNumber(invoiceNo);
+  const seq = await getNextSequence(`receipt-${fy}-${invoiceSerial}`);
+  const recSerial = String(seq).padStart(4, "0");
+  return `${fy}/INV-${invoiceSerial}/REC-${recSerial}`;
+}
+
+// Generate refund id: "25-26/INV-0001/REF-0001"
+async function generateRefundId(invoiceNo) {
+  const { fy, invoiceSerial } = parseInvoiceNumber(invoiceNo);
+  const seq = await getNextSequence(`refund-${fy}-${invoiceSerial}`);
+  const refSerial = String(seq).padStart(4, "0");
+  return `${fy}/INV-${invoiceSerial}/REF-${refSerial}`;
 }
 
 // FRONTEND base URL (React app)
@@ -120,19 +146,25 @@ app.get("/", (_req, res) => {
 // FIRESTORE SCHEMA:
 //
 // bills:
-//   { patientName, address, age, date, invoiceNo, subtotal, adjust,
+//   { patientName, sex, address, age, date, invoiceNo, subtotal, adjust,
 //     total, paid, refunded, balance, doctorReg1, doctorReg2,
-//     status, createdAt }
+//     status, createdAt, remarks, services: [{ item, details, qty, rate, amount }] }
 //
 // items:
 //   { billId, description, qty, rate, amount }
 //
 // payments:
 //   { billId, amount, mode, referenceNo, drawnOn, drawnAs,
+//     chequeDate, chequeNumber, bankName,
+//     transferType, transferDate,
+//     upiName, upiId, upiDate,
 //     paymentDate, paymentTime, paymentDateTime, receiptNo }
 //
 // refunds:
 //   { billId, amount, mode, referenceNo, drawnOn, drawnAs,
+//     chequeDate, chequeNumber, bankName,
+//     transferType, transferDate,
+//     upiName, upiId, upiDate,
 //     refundDate, refundTime, refundDateTime, refundReceiptNo }
 //
 
@@ -152,8 +184,7 @@ app.get("/api/bills", async (_req, res) => {
         const paidGross = Number(b.paid || 0); // all payments
         const refunded = Number(b.refunded || 0); // all refunds
         const paidNet = paidGross - refunded;
-        const balance =
-          b.balance != null ? Number(b.balance) : total - paidNet;
+        const balance = b.balance != null ? Number(b.balance) : total - paidNet;
 
         return {
           id: doc.id,
@@ -181,6 +212,7 @@ app.post("/api/bills", async (req, res) => {
   try {
     const {
       patientName,
+      sex,
       address,
       age,
       date,
@@ -190,48 +222,86 @@ app.post("/api/bills", async (req, res) => {
       pay,
       paymentMode,
       referenceNo,
+
+      // NEW – mode-specific payment fields from CreateBill
+      chequeDate,
+      chequeNumber,
+      bankName,
+      transferType,
+      transferDate,
+      upiName,
+      upiId,
+      upiDate,
+
       drawnOn,
       drawnAs,
+
+      // generic remarks
+      remarks,
+
+      // service rows from CreateBill
       services,
     } = req.body;
 
     const jsDate = date || new Date().toISOString().slice(0, 10);
 
-    const itemsData = (services || []).map((s) => {
-      const qty = Number(s.qty) || 0;
-      const rate = Number(s.rate) || 0;
-      const amount = qty * rate;
+    // NORMALIZE services array to a consistent shape
+    const normalizedServices = Array.isArray(services)
+      ? services.map((s) => {
+          const qty = Number(s.qty) || 0;
+          const rate = Number(s.rate) || 0;
+          const amount = qty * rate;
+          return {
+            item: s.item || "",
+            details: s.details || "",
+            qty,
+            rate,
+            amount,
+          };
+        })
+      : [];
+
+    // ITEMS table data (for legacy items collection)
+    const itemsData = normalizedServices.map((s) => {
+      const parts = [];
+      if (s.item) parts.push(s.item);
+      if (s.details) parts.push(s.details);
+      const description = parts.join(" - ") || "";
       return {
-        description: s.description || "",
-        qty,
-        rate,
-        amount,
+        description,
+        qty: s.qty,
+        rate: s.rate,
+        amount: s.amount,
       };
     });
 
     const subtotal = itemsData.reduce((sum, it) => sum + Number(it.amount), 0);
     const adj = Number(adjust) || 0;
     const total = subtotal + adj;
+
     const firstPay = Number(pay) || 0;
     const refunded = 0;
     const effectivePaid = firstPay - refunded;
     const balance = total - effectivePaid;
-
     const status = computeStatus(total, effectivePaid);
 
-    const billId = generateBillId(patientName, jsDate);
+    // NEW: invoice number based on financial year + sequence
+    const { invoiceNo, fy, serial } = await generateInvoiceNumber(jsDate);
+    const billId = invoiceNo.replace(/\//g, "_"); // e.g. "25-26/INV-0001"
     const createdAt = new Date().toISOString();
 
     const billRef = db.collection("bills").doc(billId);
+
     const batch = db.batch();
 
     // 1) Bill
     batch.set(billRef, {
       patientName: patientName || "",
+      sex: sex || null,
       address: address || "",
       age: age ? Number(age) : null,
       date: jsDate,
-      invoiceNo: billId,
+      invoiceNo: invoiceNo,
       doctorReg1: doctorReg1 || null,
       doctorReg2: doctorReg2 || null,
       subtotal,
@@ -242,9 +312,12 @@ app.post("/api/bills", async (req, res) => {
       balance,
       status,
       createdAt,
+      remarks: remarks || null,
+      // store normalized services on the bill for PDFs / future UI
+      services: normalizedServices,
     });
 
-    // 2) Items
+    // 2) Items collection (legacy)
     itemsData.forEach((item) => {
       const itemRef = db.collection("items").doc();
       batch.set(itemRef, {
@@ -258,8 +331,10 @@ app.post("/api/bills", async (req, res) => {
     let receiptDoc = null;
 
     if (firstPay > 0) {
-      const receiptNo = await generateReceiptNumber();
-      const paymentRef = db.collection("payments").doc();
+      // NEW: receipt id based on invoice id
+      const receiptNo = await generateReceiptId(invoiceNo); // 25-26/INV-0001/Rec-0001
+      const paymentId = receiptNo.replace(/\//g, "_");
+      const paymentRef = db.collection("Receipt").doc();
       const now = new Date();
       const paymentDate = jsDate;
       const paymentTime = now.toTimeString().slice(0, 5);
@@ -272,45 +347,61 @@ app.post("/api/bills", async (req, res) => {
         referenceNo: referenceNo || null,
         drawnOn: drawnOn || null,
         drawnAs: drawnAs || null,
+
+        // persist mode-specific extras for first payment too
+        chequeDate: chequeDate || null,
+        chequeNumber: chequeNumber || null,
+        bankName: bankName || null,
+
+        transferType: transferType || null,
+        transferDate: transferDate || null,
+
+        upiName: upiName || null,
+        upiId: upiId || null,
+        upiDate: upiDate || null,
+
         paymentDate,
         paymentTime,
         paymentDateTime,
         receiptNo,
       };
+
       batch.set(paymentRef, paymentDoc);
-      receiptDoc = { receiptNo };
+      receiptDoc = { id: paymentId, receiptNo };
     }
 
     await batch.commit();
 
     // invalidate cache on write
     cache.flushAll();
-    // async fire-and-forget (no await if you don't care about result blocking request)
-syncBillToSheet({
-  id: billId,
-  invoiceNo: billId,
-  patientName,
-  address,
-  age,
-  date: jsDate,
-  doctorReg1,
-  doctorReg2,
-  subtotal,
-  adjust: adj,
-  total,
-  paid: firstPay,
-  refunded,
-  balance,
-  status,
-});
 
-syncItemsToSheet(billId, billId, patientName, itemsData);
+    // async fire-and-forget (no await)
+    syncBillToSheet({
+      id: billId,
+      invoiceNo: invoiceNo,
+      patientName,
+      address,
+      age,
+      date: jsDate,
+      doctorReg1,
+      doctorReg2,
+      subtotal,
+      adjust: adj,
+      total,
+      paid: firstPay,
+      refunded,
+      balance,
+      status,
+    });
+
+    syncItemsToSheet(billId, billId, patientName, itemsData);
 
     res.json({
       bill: {
         id: billId,
-        invoiceNo: billId,
+        invoiceNo: invoiceNo,
         patientName: patientName || "",
+        sex: sex || null,
         address: address || "",
         age: age ? Number(age) : null,
         date: jsDate,
@@ -323,11 +414,20 @@ syncItemsToSheet(billId, billId, patientName, itemsData);
         refunded,
         balance,
         status,
-        items: itemsData,
+        remarks: remarks || null,
+        services: normalizedServices,
         paymentMode: paymentDoc?.mode || null,
         referenceNo: paymentDoc?.referenceNo || null,
         drawnOn: paymentDoc?.drawnOn || null,
         drawnAs: paymentDoc?.drawnAs || null,
+        chequeDate: paymentDoc?.chequeDate || null,
+        chequeNumber: paymentDoc?.chequeNumber || null,
+        bankName: paymentDoc?.bankName || null,
+        transferType: paymentDoc?.transferType || null,
+        transferDate: paymentDoc?.transferDate || null,
+        upiName: paymentDoc?.upiName || null,
+        upiId: paymentDoc?.upiId || null,
+        upiDate: paymentDoc?.upiDate || null,
       },
       payment: paymentDoc,
       receipt: receiptDoc,
@@ -337,17 +437,6 @@ syncItemsToSheet(billId, billId, patientName, itemsData);
     res.status(500).json({ error: "Failed to create bill" });
   }
 });
-
-
-
-
-
-
-
-
-
-
-
 
 // ---------- GET /api/bills/:id (detail + items + payments + refunds) ----------
 app.get("/api/bills/:id", async (req, res) => {
@@ -403,8 +492,12 @@ app.get("/api/bills/:id", async (req, res) => {
       });
 
       payments.sort((a, b) => {
-        const da = a.paymentDateTime ? new Date(a.paymentDateTime) : new Date(0);
-        const dbb = b.paymentDateTime ? new Date(b.paymentDateTime) : new Date(0);
+        const da = a.paymentDateTime
+          ? new Date(a.paymentDateTime)
+          : new Date(0);
+        const dbb = b.paymentDateTime
+          ? new Date(b.paymentDateTime)
+          : new Date(0);
         return da - dbb;
       });
 
@@ -440,9 +533,7 @@ app.get("/api/bills/:id", async (req, res) => {
 
       refunds.sort((a, b) => {
         const da = a.refundDateTime ? new Date(a.refundDateTime) : new Date(0);
-        const dbb = b.refundDateTime
-          ? new Date(b.refundDateTime)
-          : new Date(0);
+        const dbb = b.refundDateTime ? new Date(b.refundDateTime) : new Date(0);
         return da - dbb;
       });
 
@@ -462,6 +553,7 @@ app.get("/api/bills/:id", async (req, res) => {
         id,
         invoiceNo: bill.invoiceNo || id,
         patientName: bill.patientName || "",
+        sex: bill.sex || null,
         address: bill.address || "",
         age: bill.age || null,
         date: bill.date || null,
@@ -475,6 +567,8 @@ app.get("/api/bills/:id", async (req, res) => {
         status,
         doctorReg1: bill.doctorReg1 || null,
         doctorReg2: bill.doctorReg2 || null,
+        remarks: bill.remarks || null,
+        services: bill.services || null,
         items,
         payments,
         refunds,
@@ -502,7 +596,24 @@ app.post("/api/bills/:id/payments", async (req, res) => {
     return res.status(400).json({ error: "Invalid bill id" });
   }
 
-  const { amount, mode, referenceNo, drawnOn, drawnAs } = req.body;
+  const {
+    amount,
+    mode,
+    referenceNo,
+    drawnOn,
+    drawnAs,
+
+    // NEW – mode-specific fields
+    chequeDate,
+    chequeNumber,
+    bankName,
+    transferType,
+    transferDate,
+    upiName,
+    upiId,
+    upiDate,
+  } = req.body;
+
   const numericAmount = Number(amount);
 
   if (!numericAmount || numericAmount <= 0) {
@@ -523,9 +634,11 @@ app.post("/api/bills/:id/payments", async (req, res) => {
     const paymentDate = now.toISOString().slice(0, 10);
     const paymentTime = now.toTimeString().slice(0, 5);
     const paymentDateTime = now.toISOString();
-    const receiptNo = await generateReceiptNumber();
 
-    const paymentRef = db.collection("payments").doc();
+    const invoiceNo = bill.invoiceNo || billId;
+    const receiptNo = await generateReceiptId(invoiceNo); // 25-26/INV-0001/REC-0002
+    const paymentId = receiptNo.replace(/\//g, "_"); // 25-26_INV-0001_REC-0002
+    const paymentRef = db.collection("payments").doc(paymentId);
     const paymentDoc = {
       billId,
       amount: numericAmount,
@@ -533,6 +646,19 @@ app.post("/api/bills/:id/payments", async (req, res) => {
       referenceNo: referenceNo || null,
       drawnOn: drawnOn || null,
       drawnAs: drawnAs || null,
+
+      // NEW – mode-specific fields persisted
+      chequeDate: chequeDate || null,
+      chequeNumber: chequeNumber || null,
+      bankName: bankName || null,
+
+      transferType: transferType || null,
+      transferDate: transferDate || null,
+
+      upiName: upiName || null,
+      upiId: upiId || null,
+      upiDate: upiDate || null,
+
       paymentDate,
       paymentTime,
       paymentDateTime,
@@ -560,15 +686,14 @@ app.post("/api/bills/:id/payments", async (req, res) => {
     // invalidate cache on write
     cache.flushAll();
 
-    // reload minimal bill info for sheet row
-syncPaymentToSheet(
-  { id: paymentRef.id, ...paymentDoc },
-  { id: billId, invoiceNo: bill.invoiceNo, patientName: bill.patientName }
-);
-
+    // sync to sheet
+    syncPaymentToSheet(
+      { id: paymentRef.id, ...paymentDoc },
+      { id: billId, invoiceNo: bill.invoiceNo, patientName: bill.patientName }
+    );
 
     res.status(201).json({
-      id: paymentRef.id,
+      id: paymentId,   
       ...paymentDoc,
     });
   } catch (err) {
@@ -577,17 +702,6 @@ syncPaymentToSheet(
   }
 });
 
-
-
-
-
-
-
-
-
-
-
-
 // ---------- POST /api/bills/:id/refunds (issue refund) ----------
 app.post("/api/bills/:id/refunds", async (req, res) => {
   const billId = req.params.id;
@@ -595,7 +709,24 @@ app.post("/api/bills/:id/refunds", async (req, res) => {
     return res.status(400).json({ error: "Invalid bill id" });
   }
 
-  const { amount, mode, referenceNo, drawnOn, drawnAs } = req.body;
+  const {
+    amount,
+    mode,
+    referenceNo,
+    drawnOn,
+    drawnAs,
+
+    // NEW – mode-specific fields
+    chequeDate,
+    chequeNumber,
+    bankName,
+    transferType,
+    transferDate,
+    upiName,
+    upiId,
+    upiDate,
+  } = req.body;
+
   const numericAmount = Number(amount);
 
   if (!numericAmount || numericAmount <= 0) {
@@ -626,9 +757,11 @@ app.post("/api/bills/:id/refunds", async (req, res) => {
     const refundDate = now.toISOString().slice(0, 10);
     const refundTime = now.toTimeString().slice(0, 5);
     const refundDateTime = now.toISOString();
-    const refundReceiptNo = await generateRefundNumber();
+    const invoiceNo = bill.invoiceNo || billId;
+const refundReceiptNo = await generateRefundId(invoiceNo);      // 25-26/INV-0001/REF-0001
+const refundId = refundReceiptNo.replace(/\//g, "_");           // 25-26_INV-0001_REF-0001
+const refundRef = db.collection("refunds").doc(refundId);
 
-    const refundRef = db.collection("refunds").doc();
     const refundDoc = {
       billId,
       amount: numericAmount,
@@ -636,6 +769,19 @@ app.post("/api/bills/:id/refunds", async (req, res) => {
       referenceNo: referenceNo || null,
       drawnOn: drawnOn || null,
       drawnAs: drawnAs || null,
+
+      // NEW – mode-specific fields persisted
+      chequeDate: chequeDate || null,
+      chequeNumber: chequeNumber || null,
+      bankName: bankName || null,
+
+      transferType: transferType || null,
+      transferDate: transferDate || null,
+
+      upiName: upiName || null,
+      upiId: upiId || null,
+      upiDate: upiDate || null,
+
       refundDate,
       refundTime,
       refundDateTime,
@@ -661,11 +807,12 @@ app.post("/api/bills/:id/refunds", async (req, res) => {
     cache.flushAll();
 
     syncRefundToSheet(
-  { id: refundRef.id, ...refundDoc },
-  { id: billId, invoiceNo: bill.invoiceNo, patientName: bill.patientName }
-);
+      { id: refundRef.id, ...refundDoc },
+      { id: billId, invoiceNo: bill.invoiceNo, patientName: bill.patientName }
+    );
+
     res.status(201).json({
-      id: refundRef.id,
+      id: refundId,
       ...refundDoc,
     });
   } catch (err) {
@@ -673,15 +820,6 @@ app.post("/api/bills/:id/refunds", async (req, res) => {
     res.status(500).json({ error: "Refund failed" });
   }
 });
-
-
-
-
-
-
-
-
-
 
 // ---------- GET /api/payments/:id (JSON for receipt page) ----------
 app.get("/api/payments/:id", async (req, res) => {
@@ -725,7 +863,9 @@ app.get("/api/payments/:id", async (req, res) => {
           return { id: doc.id, paymentDateTime, amount: Number(d.amount || 0) };
         })
         .sort((a, b) => {
-          const da = a.paymentDateTime ? new Date(a.paymentDateTime) : new Date(0);
+          const da = a.paymentDateTime
+            ? new Date(a.paymentDateTime)
+            : new Date(0);
           const dbb = b.paymentDateTime
             ? new Date(b.paymentDateTime)
             : new Date(0);
@@ -801,7 +941,7 @@ app.get("/api/payments/:id", async (req, res) => {
   }
 });
 
-// ---------- GET /api/bills/:id/invoice-html-pdf (Invoice – A4 full page) ----------
+// ---------- PDF: Invoice (A4 full page) ----------
 app.get("/api/bills/:id/invoice-html-pdf", async (req, res) => {
   const id = req.params.id;
   if (!id) return res.status(400).json({ error: "Invalid bill id" });
@@ -814,16 +954,54 @@ app.get("/api/bills/:id/invoice-html-pdf", async (req, res) => {
     }
     const bill = billSnap.data();
 
+    // 1) LEGACY ITEMS
     const itemsSnap = await db
       .collection("items")
       .where("billId", "==", id)
       .get();
 
-    const items = itemsSnap.docs.map((doc) => ({
-      id: doc.id,
-      ...doc.data(),
-    }));
+    const legacyItems = itemsSnap.docs.map((doc) => {
+      const d = doc.data();
+      const qty = Number(d.qty || 0);
+      const rate = Number(d.rate || 0);
+      const amount = d.amount != null ? Number(d.amount) : qty * rate;
 
+      const description = d.description || d.item || d.details || "";
+
+      return {
+        id: doc.id,
+        qty,
+        rate,
+        amount,
+        description,
+      };
+    });
+
+    // 2) NEW SERVICES
+    const serviceItems = Array.isArray(bill.services)
+      ? bill.services.map((s, idx) => {
+          const qty = Number(s.qty || 0);
+          const rate = Number(s.rate || 0);
+          const amount = s.amount != null ? Number(s.amount) : qty * rate;
+
+          const parts = [];
+          if (s.item) parts.push(s.item);
+          if (s.details) parts.push(s.details);
+
+          return {
+            id: `svc-${idx + 1}`,
+            qty,
+            rate,
+            amount,
+            description: parts.join(" - "),
+          };
+        })
+      : [];
+
+    // 3) FINAL ITEMS
+    const items = serviceItems.length > 0 ? serviceItems : legacyItems;
+
+    // 4) PAYMENTS
     const paysSnap = await db
       .collection("payments")
       .where("billId", "==", id)
@@ -846,7 +1024,9 @@ app.get("/api/bills/:id/invoice-html-pdf", async (req, res) => {
         };
       })
       .sort((a, b) => {
-        const da = a.paymentDateTime ? new Date(a.paymentDateTime) : new Date(0);
+        const da = a.paymentDateTime
+          ? new Date(a.paymentDateTime)
+          : new Date(0);
         const dbb = b.paymentDateTime
           ? new Date(b.paymentDateTime)
           : new Date(0);
@@ -854,11 +1034,13 @@ app.get("/api/bills/:id/invoice-html-pdf", async (req, res) => {
       });
 
     const primaryPayment = payments[0] || null;
+
     const totalPaidGross = payments.reduce(
       (sum, p) => sum + Number(p.amount || 0),
       0
     );
 
+    // 5) REFUNDS
     const refundsSnap = await db
       .collection("refunds")
       .where("billId", "==", id)
@@ -871,9 +1053,18 @@ app.get("/api/bills/:id/invoice-html-pdf", async (req, res) => {
 
     const totalRefunded = refunds.reduce((sum, r) => sum + r, 0);
 
-    const subtotal = Number(bill.subtotal || 0);
-    const adjust = Number(bill.adjust || 0);
-    const total = Number(bill.total || 0);
+    // 6) TOTALS
+    let subtotal = Number(bill.subtotal || 0);
+    let adjust = Number(bill.adjust || 0);
+    let total = Number(bill.total || 0);
+
+    if (!subtotal && items.length > 0) {
+      subtotal = items.reduce((sum, it) => sum + Number(it.amount || 0), 0);
+    }
+    if (!total && subtotal) {
+      total = subtotal + adjust;
+    }
+
     const paidNet = totalPaidGross - totalRefunded;
     const balance = total - paidNet;
 
@@ -883,7 +1074,6 @@ app.get("/api/bills/:id/invoice-html-pdf", async (req, res) => {
 
     const invoiceNo = bill.invoiceNo || id;
     const dateText = bill.date || "";
-
     const patientName = bill.patientName || "";
     const ageText =
       bill.age != null && bill.age !== "" ? `${bill.age} Years` : "";
@@ -893,6 +1083,10 @@ app.get("/api/bills/:id/invoice-html-pdf", async (req, res) => {
     const drawnOn = primaryPayment?.drawnOn || null;
     const drawnAs = primaryPayment?.drawnAs || null;
 
+    const drawnOnText = drawnOn || "________________________";
+    const drawnAsText = drawnAs || "________________________";
+
+    // 7) PDF START
     res.setHeader("Content-Type", "application/pdf");
     res.setHeader(
       "Content-Disposition",
@@ -921,7 +1115,10 @@ app.get("/api/bills/:id/invoice-html-pdf", async (req, res) => {
     } catch (e) {}
 
     try {
-      doc.image(logoRightPath, rightX - 45, y, { width: 45, height: 45 });
+      doc.image(logoRightPath, rightX - 45, y, {
+        width: 45,
+        height: 45,
+      });
     } catch (e) {}
 
     doc
@@ -936,7 +1133,7 @@ app.get("/api/bills/:id/invoice-html-pdf", async (req, res) => {
       .font("Helvetica")
       .fontSize(9)
       .text(
-        "SONARI: E-501, Sonari East Layout, Near Subzi Sangh, Kali Puja Maidan, Jamshedpur - 831011",
+        "SONARI: E-501, Sonari East Layout, Near Sabuz Sangh Kali Puja Maidan, Jamshedpur - 831011",
         0,
         y + 24,
         { align: "center", width: pageWidth }
@@ -948,10 +1145,14 @@ app.get("/api/bills/:id/invoice-html-pdf", async (req, res) => {
 
     y += 60;
 
-    doc.moveTo(36, y).lineTo(pageWidth - 36, y).stroke();
+    doc
+      .moveTo(36, y)
+      .lineTo(pageWidth - 36, y)
+      .stroke();
 
     y += 4;
 
+    // static doctor names + reg nos
     doc.fontSize(9).font("Helvetica-Bold");
     doc.text("Dr. Pradipta Kundu", 36, y);
     doc.text("Dr. (Mrs.) Amita Kundu", pageWidth / 2, y, {
@@ -961,21 +1162,16 @@ app.get("/api/bills/:id/invoice-html-pdf", async (req, res) => {
 
     y += 12;
     doc.font("Helvetica").fontSize(8);
-    doc.text(`Reg. No.: ${bill.doctorReg1 || "________"}`, 36, y);
-    doc.text(
-      `Reg. No.: ${bill.doctorReg2 || "________"}`,
-      pageWidth / 2,
-      y,
-      {
-        align: "right",
-        width: usableWidth / 2,
-      }
-    );
+    doc.text("Reg. No.: 28873", 36, y);
+    doc.text("Reg. No.: 16219", pageWidth / 2, y, {
+      align: "right",
+      width: usableWidth / 2,
+    });
 
-    y += 16;
+    y += 18;
 
+    // invoice title bar
     doc.rect(36, y, usableWidth, 18).stroke();
-
     doc
       .font("Helvetica-Bold")
       .fontSize(10)
@@ -1008,15 +1204,13 @@ app.get("/api/bills/:id/invoice-html-pdf", async (req, res) => {
 
     y += 12;
 
-    doc.text(
-      `Address: ${bill.address || "________________________"}`,
-      36,
-      y,
-      { width: usableWidth }
-    );
+    doc.text(`Address: ${bill.address || "________________________"}`, 36, y, {
+      width: usableWidth,
+    });
 
     y += 20;
 
+    // 8) SERVICES TABLE
     const tableLeft = 36;
     const colSrW = 22;
     const colQtyW = 48;
@@ -1033,12 +1227,19 @@ app.get("/api/bills/:id/invoice-html-pdf", async (req, res) => {
     const colAdjX = colRateX + colRateW;
     const colSubX = colAdjX + colAdjW;
 
-    doc.rect(tableLeft, y, usableWidth, 16).stroke();
+    // header background
+    doc
+      .save()
+      .rect(tableLeft, y, usableWidth, 16)
+      .fill("#F3F3F3")
+      .restore()
+      .rect(tableLeft, y, usableWidth, 16)
+      .stroke();
 
     doc.font("Helvetica-Bold").fontSize(9);
     doc.text("Sr.", colSrX + 2, y + 3);
-    doc.text("Hrs / Qty", colQtyX + 2, y + 3);
-    doc.text("Service", colServiceX + 2, y + 3, {
+    doc.text("Qty", colQtyX + 2, y + 3);
+    doc.text("Procedure", colServiceX + 2, y + 3, {
       width: colServiceW - 4,
     });
     doc.text("Rate / Price", colRateX + 2, y + 3, {
@@ -1058,19 +1259,20 @@ app.get("/api/bills/:id/invoice-html-pdf", async (req, res) => {
     doc.font("Helvetica").fontSize(9);
 
     items.forEach((item, idx) => {
-      const qty = Number(item.qty || 0);
-      const rate = Number(item.rate || 0);
-      const amount = Number(item.amount || qty * rate);
       const rowHeight = 14;
 
       doc.rect(tableLeft, y, usableWidth, rowHeight).stroke();
 
       doc.text(String(idx + 1), colSrX + 2, y + 3);
-      doc.text(String(qty || ""), colQtyX + 2, y + 3);
+      doc.text(
+        item.qty != null && item.qty !== "" ? String(item.qty) : "",
+        colQtyX + 2,
+        y + 3
+      );
       doc.text(item.description || "", colServiceX + 2, y + 3, {
         width: colServiceW - 4,
       });
-      doc.text(formatMoney(rate), colRateX + 2, y + 3, {
+      doc.text(formatMoney(item.rate || 0), colRateX + 2, y + 3, {
         width: colRateW - 4,
         align: "right",
       });
@@ -1078,7 +1280,7 @@ app.get("/api/bills/:id/invoice-html-pdf", async (req, res) => {
         width: colAdjW - 4,
         align: "right",
       });
-      doc.text(formatMoney(amount), colSubX + 2, y + 3, {
+      doc.text(formatMoney(item.amount || 0), colSubX + 2, y + 3, {
         width: colSubW - 4,
         align: "right",
       });
@@ -1093,6 +1295,7 @@ app.get("/api/bills/:id/invoice-html-pdf", async (req, res) => {
 
     y += 12;
 
+    // 9) TOTALS BOX
     const boxWidth = 180;
     const boxX = pageWidth - 36 - boxWidth;
     const boxY = y;
@@ -1133,55 +1336,54 @@ app.get("/api/bills/:id/invoice-html-pdf", async (req, res) => {
       align: "right",
     });
 
-    doc.font("Helvetica");
+    // move below totals box
     y = boxY + lineH * 5 + 20;
 
-    doc.fontSize(9);
+    // NET PAID + BALANCE
+    doc.font("Helvetica").fontSize(9);
     doc.text(`Amount Paid (net): Rs ${formatMoney(paidNet)}`, 36, y);
     doc.text(`Balance: Rs ${formatMoney(balance)}`, pageWidth / 2, y, {
       align: "right",
       width: usableWidth / 2,
     });
 
-    y += 22;
+    y += 18;
 
-    const fullWidth = usableWidth;
+    // PAYMENT DETAILS BLOCK
+    doc.font("Helvetica-Bold").fontSize(9);
+    doc.text("Payment Details:", 36, y);
+    y += 12;
 
-    let line = `Received with thanks from Shri/Smt./M/s ${patientName} the sum of Rupees Rs ${formatMoney(
-      paidNet
-    )} dated ${dateText} by ${paymentMode || "________"} / Bank / Transfer / Cheque No. / UPI`;
-    if (referenceNo) {
-      line += ` (${referenceNo})`;
-    }
-    line += ".";
+    doc.font("Helvetica").fontSize(8);
+    doc.text(`Mode: ${paymentMode || "________"}`, 36, y, {
+      width: usableWidth / 2,
+    });
+    doc.text(`REF No.: ${referenceNo || "________"}`, pageWidth / 2, y, {
+      width: usableWidth / 2,
+      align: "right",
+    });
+    y += 12;
 
-    doc.fontSize(9).text(line, 36, y, { width: fullWidth });
+    doc.text(`Drawn On: ${drawnOnText}`, 36, y, {
+      width: usableWidth / 2,
+    });
+    doc.text(`Drawn As: ${drawnAsText}`, pageWidth / 2, y, {
+      width: usableWidth / 2,
+      align: "right",
+    });
 
-    y = doc.y + 6;
+    y += 20;
 
-    const drawnOnText = drawnOn || "________________________";
-    const drawnAsText = drawnAs || "________________________";
-
-    doc.text(
-      `Drawn on ${drawnOnText} (Subject to realization) as ${drawnAsText}.`,
-      36,
-      y,
-      { width: fullWidth }
-    );
-
-    y = doc.y + 6;
-
+    // FOOTER NOTES
     doc
       .fontSize(8)
-      .text(
-        "* Dispute if any Subject to Jamshedpur Jurisdiction",
-        36,
-        y,
-        { width: fullWidth }
-      );
+      .text("* Dispute if any Subject to Jamshedpur Jurisdiction", 36, y, {
+        width: usableWidth,
+      });
 
     y = doc.y + 30;
 
+    // SIGNATURE LINES
     const sigWidth = 160;
     const sigY = y;
 
@@ -1219,7 +1421,7 @@ app.get("/api/bills/:id/invoice-html-pdf", async (req, res) => {
   }
 });
 
-// ---------- PDF: Payment Receipt (A4 half page) ----------
+// ---------- PDF: Payment Receipt (A4 half page, professional layout) ----------
 app.get("/api/payments/:id/receipt-html-pdf", async (req, res) => {
   const id = req.params.id;
   if (!id) return res.status(400).json({ error: "Invalid payment id" });
@@ -1239,13 +1441,12 @@ app.get("/api/payments/:id/receipt-html-pdf", async (req, res) => {
       return res.status(404).json({ error: "Bill not found" });
     }
     const bill = billSnap.data();
+    const billTotal = Number(bill.total || 0);
 
     const paysSnap = await db
       .collection("payments")
       .where("billId", "==", billId)
       .get();
-
-    const billTotal = Number(bill.total || 0);
 
     const allPayments = paysSnap.docs
       .map((doc) => {
@@ -1260,7 +1461,9 @@ app.get("/api/payments/:id/receipt-html-pdf", async (req, res) => {
         };
       })
       .sort((a, b) => {
-        const da = a.paymentDateTime ? new Date(a.paymentDateTime) : new Date(0);
+        const da = a.paymentDateTime
+          ? new Date(a.paymentDateTime)
+          : new Date(0);
         const dbb = b.paymentDateTime
           ? new Date(b.paymentDateTime)
           : new Date(0);
@@ -1289,8 +1492,16 @@ app.get("/api/payments/:id/receipt-html-pdf", async (req, res) => {
     const drawnAs = payment.drawnAs || null;
     const mode = payment.mode || "Cash";
     const referenceNo = payment.referenceNo || null;
-    const receiptNo =
-      payment.receiptNo || `R-${String(id).padStart(4, "0")}`;
+    const receiptNo = payment.receiptNo || `R-${String(id).padStart(4, "0")}`;
+
+    const chequeDate = payment.chequeDate || null;
+    const chequeNumber = payment.chequeNumber || null;
+    const bankName = payment.bankName || null;
+    const transferType = payment.transferType || null;
+    const transferDate = payment.transferDate || null;
+    const upiName = payment.upiName || null;
+    const upiId = payment.upiId || null;
+    const upiDate = payment.upiDate || null;
 
     res.setHeader("Content-Type", "application/pdf");
     res.setHeader(
@@ -1312,15 +1523,15 @@ app.get("/api/payments/:id/receipt-html-pdf", async (req, res) => {
     const logoLeftPath = path.join(__dirname, "resources", "logo-left.png");
     const logoRightPath = path.join(__dirname, "resources", "logo-right.png");
 
-    const leftX = 36;
-    const rightX = pageWidth - 36;
+    const leftLogoX = 36;
+    const rightLogoX = pageWidth - 36;
 
+    // HEADER
     try {
-      doc.image(logoLeftPath, leftX, y, { width: 32, height: 32 });
+      doc.image(logoLeftPath, leftLogoX, y, { width: 32, height: 32 });
     } catch (e) {}
-
     try {
-      doc.image(logoRightPath, rightX - 32, y, { width: 32, height: 32 });
+      doc.image(logoRightPath, rightLogoX - 32, y, { width: 32, height: 32 });
     } catch (e) {}
 
     doc
@@ -1335,7 +1546,7 @@ app.get("/api/payments/:id/receipt-html-pdf", async (req, res) => {
       .font("Helvetica")
       .fontSize(9)
       .text(
-        "SONARI: E-501, Sonari East Layout, Near Subzi Sangh, Kali Puja Maidan, Jamshedpur - 831011",
+        "SONARI: E-501, Sonari East Layout, Near Sabuz Sangh Kali Puja Maidan, Jamshedpur - 831011",
         0,
         y + 20,
         {
@@ -1350,138 +1561,149 @@ app.get("/api/payments/:id/receipt-html-pdf", async (req, res) => {
 
     y += 48;
 
-    doc.moveTo(36, y).lineTo(pageWidth - 36, y).stroke();
-
+    doc
+      .moveTo(36, y)
+      .lineTo(pageWidth - 36, y)
+      .stroke();
     y += 6;
 
-    doc.rect(36, y, usableWidth, 16).stroke();
+    // DOCTOR LINE (static)
+    doc.font("Helvetica-Bold").fontSize(9);
+    doc.text("Dr. Pradipta Kundu", 36, y);
+    doc.text("Dr. (Mrs.) Amita Kundu", pageWidth / 2, y, {
+      align: "right",
+      width: usableWidth / 2,
+    });
 
-    doc
-      .font("Helvetica-Bold")
-      .fontSize(10)
-      .text("PAYMENT RECEIPT", 36, y + 3, {
-        align: "center",
-        width: usableWidth,
-      });
-
-    y += 24;
-
-    doc.font("Helvetica").fontSize(9);
-    doc.text(`Receipt No.: ${receiptNo}`, 36, y);
-    doc.text(`Date: ${payment.paymentDate || ""}`, pageWidth / 2, y, {
+    y += 12;
+    doc.font("Helvetica").fontSize(8);
+    doc.text("Reg. No.: 28873", 36, y);
+    doc.text("Reg. No.: 16219", pageWidth / 2, y, {
       align: "right",
       width: usableWidth / 2,
     });
 
     y += 16;
 
-    const leftBlockX = 36;
-    const leftBlockWidth = usableWidth - 190;
-    const rightBoxWidth = 170;
-    const rightBoxX = pageWidth - 36 - rightBoxWidth;
-
-    const textYStart = y;
+    // TITLE BAR
+    doc
+      .save()
+      .rect(36, y, usableWidth, 18)
+      .fill("#F3F3F3")
+      .restore()
+      .rect(36, y, usableWidth, 18)
+      .stroke();
 
     doc
       .font("Helvetica-Bold")
-      .text(`Patient Name: ${patientName}`, leftBlockX, y, {
-        width: leftBlockWidth,
+      .fontSize(10)
+      .text("PAYMENT RECEIPT", 36, y + 4, {
+        align: "center",
+        width: usableWidth,
       });
 
-    y = doc.y + 6;
+    y += 26;
+
+    // COMMON LAYOUT (left details + right summary)
+    const isPayment = true;
+    const leftX = 36;
+    const rightBoxWidth = 180;
+    const rightX = pageWidth - 36 - rightBoxWidth;
+
+    doc.font("Helvetica").fontSize(9);
+    doc.text(`Receipt No.: ${receiptNo}`, leftX, y);
+    doc.text(`Date: ${payment.paymentDate || ""}`, rightX, y, {
+      width: rightBoxWidth,
+      align: "right",
+    });
+
+    y += 16;
+
+    const detailsTopY = y;
+    const leftWidth = rightX - leftX - 10;
+
+    doc
+      .font("Helvetica-Bold")
+      .text(`Patient Name: ${patientName}`, leftX, detailsTopY, {
+        width: leftWidth,
+      });
+
+    let detailsY = doc.y + 4;
     doc.font("Helvetica");
 
-    doc.text(
-      `Amount Received: Rs ${formatMoney(payment.amount)}`,
-      leftBlockX,
-      y,
-      {
-        width: leftBlockWidth,
-      }
-    );
-    y = doc.y + 4;
+    const addDetail = (label, value) => {
+      if (!value) return;
+      doc.text(`${label} ${value}`, leftX, detailsY, { width: leftWidth });
+      detailsY = doc.y + 3;
+    };
 
-    doc.text(`Payment Mode: ${mode}`, leftBlockX, y, {
-      width: leftBlockWidth,
-    });
-    y = doc.y + 4;
+    addDetail("Amount Received: Rs", formatMoney(payment.amount));
+    addDetail("Payment Mode:", mode);
+    addDetail("Reference No.:", referenceNo);
+    addDetail("Drawn On:", drawnOn);
+    addDetail("Drawn As:", drawnAs);
+    addDetail("Cheque No.:", chequeNumber);
+    addDetail("Cheque Date:", chequeDate);
+    addDetail("Bank:", bankName);
+    addDetail("Transfer Type:", transferType);
+    addDetail("Transfer Date:", transferDate);
+    addDetail("UPI ID:", upiId);
+    addDetail("UPI Name:", upiName);
+    addDetail("UPI Date:", upiDate);
 
-    if (referenceNo) {
-      doc.text(`Reference No: ${referenceNo}`, leftBlockX, y, {
-        width: leftBlockWidth,
-      });
-      y = doc.y + 4;
-    }
-
-    if (drawnOn) {
-      doc.text(`Drawn On: ${drawnOn}`, leftBlockX, y, {
-        width: leftBlockWidth,
-      });
-      y = doc.y + 4;
-    }
-
-    if (drawnAs) {
-      doc.text(`Instrument: ${drawnAs}`, leftBlockX, y, {
-        width: leftBlockWidth,
-      });
-      y = doc.y + 4;
-    }
-
-    y = doc.y + 8;
-
-    doc.fontSize(8).text(
-      "* Dispute if any Subject to Jamshedpur Jurisdiction",
-      leftBlockX,
-      y,
-      { width: leftBlockWidth }
-    );
-
-    const boxY = textYStart;
+    // RIGHT BILL SUMMARY BOX
+    const boxY = detailsTopY;
     const lineH = 12;
-    const boxHeight = lineH * 6 + 6;
+    const rows = 5; // Bill No, Date, Total, Paid, Balance
+    const boxHeight = 100;
 
-    doc.rect(rightBoxX, boxY, rightBoxWidth, boxHeight).stroke();
+    doc.rect(rightX, boxY, rightBoxWidth, boxHeight).stroke();
 
     let by = boxY + 4;
-
-    doc.font("Helvetica-Bold").fontSize(9).text("Bill Summary", rightBoxX + 6, by);
+    doc
+      .font("Helvetica-Bold")
+      .fontSize(9)
+      .text("Bill Summary", rightX + 6, by);
     by += lineH + 2;
-
     doc.font("Helvetica").fontSize(9);
 
     const billNoText = bill.invoiceNo || billId;
-    doc.text(`Bill No.: ${billNoText}`, rightBoxX + 6, by);
-    by += lineH;
 
-    doc.text(`Bill Date: ${bill.date || ""}`, rightBoxX + 6, by);
-    by += lineH;
+    const addRow = (label, value) => {
+      doc.text(label, rightX + 6, by);
+      doc.text(value, rightX + 6, by, {
+        width: rightBoxWidth - 12,
+        align: "right",
+      });
+      by += lineH;
+    };
 
-    doc.text(`Bill Total: Rs ${formatMoney(billTotal)}`, rightBoxX + 6, by);
-    by += lineH;
+    addRow("Bill No.:", billNoText);
+    addRow("Bill Date:", bill.date || "");
+    addRow("Bill Total:", `Rs ${formatMoney(billTotal)}`);
+    addRow("Paid (incl. this):", `Rs ${formatMoney(paidTillThis)}`);
+    addRow("Balance:", `Rs ${formatMoney(balanceAfterThis)}`);
 
-    doc.text(
-      `Paid (incl. this): Rs ${formatMoney(paidTillThis)}`,
-      rightBoxX + 6,
-      by
-    );
-    by += lineH;
+    // FOOTNOTE + SIGNATURES
+    y = Math.max(detailsY + 6, boxY + boxHeight + 6);
 
-    doc.text(
-      `Balance: Rs ${formatMoney(balanceAfterThis)}`,
-      rightBoxX + 6,
-      by
-    );
+    doc
+      .font("Helvetica")
+      .fontSize(8)
+      .text("* Dispute if any subject to Jamshedpur Jurisdiction", leftX, y, {
+        width: usableWidth,
+      });
 
-    const sigY = boxY + boxHeight + 40;
+    const sigY = y + 24;
     const sigWidth = 160;
 
     doc
-      .moveTo(36, sigY)
-      .lineTo(36 + sigWidth, sigY)
+      .moveTo(leftX, sigY)
+      .lineTo(leftX + sigWidth, sigY)
       .dash(1, { space: 2 })
       .stroke()
       .undash();
-    doc.fontSize(8).text("Patient / Representative", 36, sigY + 4, {
+    doc.fontSize(8).text("Patient / Representative", leftX, sigY + 4, {
       width: sigWidth,
       align: "center",
     });
@@ -1509,7 +1731,7 @@ app.get("/api/payments/:id/receipt-html-pdf", async (req, res) => {
   }
 });
 
-// ---------- PDF: Refund Receipt (A4 half page) ----------
+// ---------- PDF: Refund Receipt (A4 half page, professional layout) ----------
 app.get("/api/refunds/:id/refund-html-pdf", async (req, res) => {
   const id = req.params.id;
   if (!id) return res.status(400).json({ error: "Invalid refund id" });
@@ -1549,7 +1771,9 @@ app.get("/api/refunds/:id/refund-html-pdf", async (req, res) => {
         };
       })
       .sort((a, b) => {
-        const da = a.paymentDateTime ? new Date(a.paymentDateTime) : new Date(0);
+        const da = a.paymentDateTime
+          ? new Date(a.paymentDateTime)
+          : new Date(0);
         const dbb = b.paymentDateTime
           ? new Date(b.paymentDateTime)
           : new Date(0);
@@ -1580,9 +1804,7 @@ app.get("/api/refunds/:id/refund-html-pdf", async (req, res) => {
       })
       .sort((a, b) => {
         const da = a.refundDateTime ? new Date(a.refundDateTime) : new Date(0);
-        const dbb = b.refundDateTime
-          ? new Date(b.refundDateTime)
-          : new Date(0);
+        const dbb = b.refundDateTime ? new Date(b.refundDateTime) : new Date(0);
         return da - dbb;
       });
 
@@ -1600,8 +1822,6 @@ app.get("/api/refunds/:id/refund-html-pdf", async (req, res) => {
       }
     }
 
-    const netPaidAfterThis = totalPaidGross - refundedTillThis;
-
     function formatMoney(v) {
       return Number(v || 0).toFixed(2);
     }
@@ -1614,10 +1834,330 @@ app.get("/api/refunds/:id/refund-html-pdf", async (req, res) => {
     const refundNo =
       refund.refundReceiptNo || `F-${String(id).padStart(4, "0")}`;
 
+    const chequeDate = refund.chequeDate || null;
+    const chequeNumber = refund.chequeNumber || null;
+    const bankName = refund.bankName || null;
+    const transferType = refund.transferType || null;
+    const transferDate = refund.transferDate || null;
+    const upiName = refund.upiName || null;
+    const upiId = refund.upiId || null;
+    const upiDate = refund.upiDate || null;
+
+    res.setHeader("Content-Type", "application/pdf");
+    res.setHeader("Content-Disposition", `inline; filename="refund-${id}.pdf"`);
+
+    const doc = new PDFDocument({
+      size: "A4",
+      margin: 36,
+    });
+
+    doc.pipe(res);
+
+    const pageWidth = doc.page.width;
+    const usableWidth = pageWidth - 72;
+    let y = 40;
+
+    const logoLeftPath = path.join(__dirname, "resources", "logo-left.png");
+    const logoRightPath = path.join(__dirname, "resources", "logo-right.png");
+
+    const leftLogoX = 36;
+    const rightLogoX = pageWidth - 36;
+
+    // HEADER
+    try {
+      doc.image(logoLeftPath, leftLogoX, y, { width: 32, height: 32 });
+    } catch (e) {}
+    try {
+      doc.image(logoRightPath, rightLogoX - 32, y, { width: 32, height: 32 });
+    } catch (e) {}
+
+    doc
+      .font("Helvetica-Bold")
+      .fontSize(13)
+      .text("MADHUREKHA EYE CARE CENTRE", 0, y + 2, {
+        align: "center",
+        width: pageWidth,
+      });
+
+    doc
+      .font("Helvetica")
+      .fontSize(9)
+      .text(
+        "SONARI: E-501, Sonari East Layout, Near Sabuz Sangh Kali Puja Maidan, Jamshedpur - 831011",
+        0,
+        y + 20,
+        {
+          align: "center",
+          width: pageWidth,
+        }
+      )
+      .text("PAN : ABFFM3115J   |   Reg. No: 2035700023", {
+        align: "center",
+        width: pageWidth,
+      });
+
+    y += 48;
+
+    doc
+      .moveTo(36, y)
+      .lineTo(pageWidth - 36, y)
+      .stroke();
+    y += 6;
+
+    // DOCTOR LINE
+    doc.font("Helvetica-Bold").fontSize(9);
+    doc.text("Dr. Pradipta Kundu", 36, y);
+    doc.text("Dr. (Mrs.) Amita Kundu", pageWidth / 2, y, {
+      align: "right",
+      width: usableWidth / 2,
+    });
+
+    y += 12;
+    doc.font("Helvetica").fontSize(8);
+    doc.text("Reg. No.: 28873", 36, y);
+    doc.text("Reg. No.: 16219", pageWidth / 2, y, {
+      align: "right",
+      width: usableWidth / 2,
+    });
+
+    y += 16;
+
+    // TITLE BAR
+    doc
+      .save()
+      .rect(36, y, usableWidth, 18)
+      .fill("#F3F3F3")
+      .restore()
+      .rect(36, y, usableWidth, 18)
+      .stroke();
+
+    doc
+      .font("Helvetica-Bold")
+      .fontSize(10)
+      .text("REFUND RECEIPT", 36, y + 4, {
+        align: "center",
+        width: usableWidth,
+      });
+
+    y += 26;
+
+    // COMMON LAYOUT (left details + right summary)
+    const leftX = 36;
+    const rightBoxWidth = 180;
+    const rightX = pageWidth - 36 - rightBoxWidth;
+
+    doc.font("Helvetica").fontSize(9);
+    doc.text(`Refund No.: ${refundNo}`, leftX, y);
+    doc.text(`Date: ${refund.refundDate || ""}`, rightX, y, {
+      width: rightBoxWidth,
+      align: "right",
+    });
+
+    y += 16;
+
+    const detailsTopY = y;
+    const leftWidth = rightX - leftX - 10;
+
+    doc
+      .font("Helvetica-Bold")
+      .text(`Patient Name: ${patientName}`, leftX, detailsTopY, {
+        width: leftWidth,
+      });
+
+    let detailsY = doc.y + 4;
+    doc.font("Helvetica");
+
+    const addDetail = (label, value) => {
+      if (!value) return;
+      doc.text(`${label} ${value}`, leftX, detailsY, { width: leftWidth });
+      detailsY = doc.y + 3;
+    };
+
+    addDetail("Amount Refunded: Rs", formatMoney(refund.amount));
+    addDetail("Refund Mode:", mode);
+    addDetail("Reference No.:", referenceNo);
+    addDetail("Drawn On:", drawnOn);
+    addDetail("Drawn As:", drawnAs);
+    addDetail("Cheque No.:", chequeNumber);
+    addDetail("Cheque Date:", chequeDate);
+    addDetail("Bank:", bankName);
+    addDetail("Transfer Type:", transferType);
+    addDetail("Transfer Date:", transferDate);
+    addDetail("UPI ID:", upiId);
+    addDetail("UPI Name:", upiName);
+    addDetail("UPI Date:", upiDate);
+
+    // RIGHT BILL SUMMARY
+    const boxY = detailsTopY;
+    const lineH = 12;
+    const rows = 6; // Bill No, Date, Total, Total Paid, Refunded, Balance
+    const boxHeight = 100;
+
+    doc.rect(rightX, boxY, rightBoxWidth, boxHeight).stroke();
+
+    let by = boxY + 4;
+    doc
+      .font("Helvetica-Bold")
+      .fontSize(9)
+      .text("Bill Summary", rightX + 6, by);
+    by += lineH + 2;
+    doc.font("Helvetica").fontSize(9);
+
+    const billNoText = bill.invoiceNo || billId;
+
+    const addRow = (label, value) => {
+      doc.text(label, rightX + 6, by);
+      doc.text(value, rightX + 6, by, {
+        width: rightBoxWidth - 12,
+        align: "right",
+      });
+      by += lineH;
+    };
+
+    addRow("Bill No.:", billNoText);
+    addRow("Bill Date:", bill.date || "");
+    addRow("Bill Total:", `Rs ${formatMoney(billTotal)}`);
+    addRow("Total Paid:", `Rs ${formatMoney(totalPaidGross)}`);
+    addRow("Refunded (incl. this):", `Rs ${formatMoney(refundedTillThis)}`);
+    addRow("Balance:", `Rs ${formatMoney(balanceAfterThis)}`);
+
+    // FOOTNOTE + SIGNATURES
+    y = Math.max(detailsY + 6, boxY + boxHeight + 6);
+
+    doc
+      .font("Helvetica")
+      .fontSize(8)
+      .text("* Dispute if any subject to Jamshedpur Jurisdiction", leftX, y, {
+        width: usableWidth,
+      });
+
+    const sigY = y + 24;
+    const sigWidth = 160;
+
+    doc
+      .moveTo(leftX, sigY)
+      .lineTo(leftX + sigWidth, sigY)
+      .dash(1, { space: 2 })
+      .stroke()
+      .undash();
+    doc.fontSize(8).text("Patient / Representative", leftX, sigY + 4, {
+      width: sigWidth,
+      align: "center",
+    });
+
+    const rightSigX = pageWidth - 36 - sigWidth;
+    doc
+      .moveTo(rightSigX, sigY)
+      .lineTo(rightSigX + sigWidth, sigY)
+      .dash(1, { space: 2 })
+      .stroke()
+      .undash();
+    doc
+      .fontSize(8)
+      .text("For Madhurekha Eye Care Centre", rightSigX, sigY + 4, {
+        width: sigWidth,
+        align: "center",
+      });
+
+    doc.end();
+  } catch (err) {
+    console.error("refund-html-pdf error:", err);
+    if (!res.headersSent) {
+      res.status(500).json({ error: "Failed to generate refund PDF" });
+    }
+  }
+});
+
+// ---------- PDF: Bill Summary (A4 half page) ----------
+app.get("/api/bills/:id/summary-pdf", async (req, res) => {
+  const billId = req.params.id;
+  if (!billId) return res.status(400).json({ error: "Invalid bill id" });
+
+  try {
+    const billRef = db.collection("bills").doc(billId);
+    const billSnap = await billRef.get();
+    if (!billSnap.exists) {
+      return res.status(404).json({ error: "Bill not found" });
+    }
+    const bill = billSnap.data();
+
+    const billTotal = Number(bill.total || 0);
+
+    const paysSnap = await db
+      .collection("payments")
+      .where("billId", "==", billId)
+      .get();
+
+    const payments = paysSnap.docs.map((doc) => {
+      const d = doc.data();
+      const paymentDateTime =
+        d.paymentDateTime ||
+        (d.paymentDate ? `${d.paymentDate}T00:00:00.000Z` : null);
+      return {
+        id: doc.id,
+        amount: Number(d.amount || 0),
+        paymentDateTime,
+      };
+    });
+
+    payments.sort((a, b) => {
+      const da = a.paymentDateTime ? new Date(a.paymentDateTime) : new Date(0);
+      const dbb = b.paymentDateTime ? new Date(b.paymentDateTime) : new Date(0);
+      return da - dbb;
+    });
+
+    const totalPaidGross = payments.reduce(
+      (sum, p) => sum + Number(p.amount || 0),
+      0
+    );
+
+    const refundsSnap = await db
+      .collection("refunds")
+      .where("billId", "==", billId)
+      .get();
+
+    const refunds = refundsSnap.docs.map((doc) => {
+      const d = doc.data();
+      const refundDateTime =
+        d.refundDateTime ||
+        (d.refundDate ? `${d.refundDate}T00:00:00.000Z` : null);
+      return {
+        id: doc.id,
+        amount: Number(d.amount || 0),
+        refundDateTime,
+      };
+    });
+
+    refunds.sort((a, b) => {
+      const da = a.refundDateTime ? new Date(a.refundDateTime) : new Date(0);
+      const dbb = b.refundDateTime ? new Date(b.refundDateTime) : new Date(0);
+      return da - dbb;
+    });
+
+    const totalRefunded = refunds.reduce(
+      (sum, r) => sum + Number(r.amount || 0),
+      0
+    );
+
+    const netPaid = totalPaidGross - totalRefunded;
+    const balance = billTotal - netPaid;
+
+    const paymentsCount = payments.length;
+    const refundsCount = refunds.length;
+
+    const patientName = bill.patientName || "";
+    const invoiceNo = bill.invoiceNo || billId;
+    const billDate = bill.date || "";
+    const status = bill.status || (balance <= 0 ? "PAID" : "PENDING");
+
+    function formatMoney(v) {
+      return Number(v || 0).toFixed(2);
+    }
+
     res.setHeader("Content-Type", "application/pdf");
     res.setHeader(
       "Content-Disposition",
-      `inline; filename="refund-${id}.pdf"`
+      `inline; filename="bill-summary-${billId}.pdf"`
     );
 
     const doc = new PDFDocument({
@@ -1657,7 +2197,7 @@ app.get("/api/refunds/:id/refund-html-pdf", async (req, res) => {
       .font("Helvetica")
       .fontSize(9)
       .text(
-        "SONARI: E-501, Sonari East Layout, Near Subzi Sangh, Kali Puja Maidan, Jamshedpur - 831011",
+        "SONARI: E-501, Sonari East Layout, Near Sabuz Sangh Kali Puja Maidan, Jamshedpur - 831011",
         0,
         y + 20,
         {
@@ -1672,16 +2212,36 @@ app.get("/api/refunds/:id/refund-html-pdf", async (req, res) => {
 
     y += 48;
 
-    doc.moveTo(36, y).lineTo(pageWidth - 36, y).stroke();
-
+    doc
+      .moveTo(36, y)
+      .lineTo(pageWidth - 36, y)
+      .stroke();
     y += 6;
 
-    doc.rect(36, y, usableWidth, 16).stroke();
+    // static doctor header
+    doc.font("Helvetica-Bold").fontSize(9);
+    doc.text("Dr. Pradipta Kundu", 36, y);
+    doc.text("Dr. (Mrs.) Amita Kundu", pageWidth / 2, y, {
+      align: "right",
+      width: usableWidth / 2,
+    });
 
+    y += 12;
+    doc.font("Helvetica").fontSize(8);
+    doc.text("Reg. No.: 28873", 36, y);
+    doc.text("Reg. No.: 16219", pageWidth / 2, y, {
+      align: "right",
+      width: usableWidth / 2,
+    });
+
+    y += 16;
+
+    // title bar
+    doc.rect(36, y, usableWidth, 16).stroke();
     doc
       .font("Helvetica-Bold")
       .fontSize(10)
-      .text("REFUND RECEIPT", 36, y + 3, {
+      .text("BILL SUMMARY", 36, y + 3, {
         align: "center",
         width: usableWidth,
       });
@@ -1689,156 +2249,77 @@ app.get("/api/refunds/:id/refund-html-pdf", async (req, res) => {
     y += 24;
 
     doc.font("Helvetica").fontSize(9);
-    doc.text(`Refund No.: ${refundNo}`, 36, y);
-    doc.text(`Date: ${refund.refundDate || ""}`, pageWidth / 2, y, {
+    doc.text(`Invoice No.: ${invoiceNo}`, 36, y);
+    doc.text(`Date: ${billDate}`, pageWidth / 2, y, {
       align: "right",
       width: usableWidth / 2,
     });
 
-    y += 16;
+    y += 12;
 
-    const leftBlockX = 36;
-    const leftBlockWidth = usableWidth - 190;
-    const rightBoxWidth = 170;
-    const rightBoxX = pageWidth - 36 - rightBoxWidth;
-
-    const textYStart = y;
-
-    doc
-      .font("Helvetica-Bold")
-      .text(`Patient Name: ${patientName}`, leftBlockX, y, {
-        width: leftBlockWidth,
-      });
-
-    y = doc.y + 6;
-    doc.font("Helvetica");
-
-    doc.text(
-      `Amount Refunded: Rs ${formatMoney(refund.amount)}`,
-      leftBlockX,
-      y,
-      {
-        width: leftBlockWidth,
-      }
-    );
-    y = doc.y + 4;
-
-    doc.text(`Refund Mode: ${mode}`, leftBlockX, y, {
-      width: leftBlockWidth,
+    doc.text(`Patient Name: ${patientName}`, 36, y, {
+      width: usableWidth,
     });
-    y = doc.y + 4;
 
-    if (referenceNo) {
-      doc.text(`Reference No: ${referenceNo}`, leftBlockX, y, {
-        width: leftBlockWidth,
-      });
-      y = doc.y + 4;
-    }
+    y += 18;
 
-    if (drawnOn) {
-      doc.text(`Drawn On: ${drawnOn}`, leftBlockX, y, {
-        width: leftBlockWidth,
-      });
-      y = doc.y + 4;
-    }
-
-    if (drawnAs) {
-      doc.text(`Instrument: ${drawnAs}`, leftBlockX, y, {
-        width: leftBlockWidth,
-      });
-      y = doc.y + 4;
-    }
-
-    y = doc.y + 8;
-
-    doc.fontSize(8).text(
-      "* Dispute if any Subject to Jamshedpur Jurisdiction",
-      leftBlockX,
-      y,
-      { width: leftBlockWidth }
-    );
-
-    const boxY = textYStart;
+    const boxWidth = 260;
+    const boxX = 36;
+    const boxY = y;
     const lineH = 12;
-    const boxHeight = lineH * 6 + 6;
+    const rows = 8;
+    const boxHeight = lineH * rows + 8;
 
-    doc.rect(rightBoxX, boxY, rightBoxWidth, boxHeight).stroke();
+    doc.rect(boxX, boxY, boxWidth, boxHeight).stroke();
 
     let by = boxY + 4;
 
-    doc.font("Helvetica-Bold").fontSize(9).text("Bill Summary", rightBoxX + 6, by);
-    by += lineH + 2;
-
     doc.font("Helvetica").fontSize(9);
 
-    const billNoText = bill.invoiceNo || billId;
-    doc.text(`Bill No.: ${billNoText}`, rightBoxX + 6, by);
-    by += lineH;
+    function row(label, value) {
+      doc.text(label, boxX + 6, by);
+      doc.text(value, boxX + 6, by, {
+        width: boxWidth - 12,
+        align: "right",
+      });
+      by += lineH;
+    }
 
-    doc.text(`Bill Date: ${bill.date || ""}`, rightBoxX + 6, by);
-    by += lineH;
+    row("Bill Total", `Rs ${formatMoney(billTotal)}`);
+    row("Total Paid (gross)", `Rs ${formatMoney(totalPaidGross)}`);
+    row("Total Refunded", `Rs ${formatMoney(totalRefunded)}`);
+    row("Net Paid", `Rs ${formatMoney(netPaid)}`);
+    row("Balance", `Rs ${formatMoney(balance)}`);
+    row("Payments Count", String(paymentsCount));
+    row("Refunds Count", String(refundsCount));
+    row("Status", status);
 
-    doc.text(`Bill Total: Rs ${formatMoney(billTotal)}`, rightBoxX + 6, by);
-    by += lineH;
+    const rightSigWidth = 160;
+    const sigY = boxY + boxHeight + 30;
+    const rightSigX = pageWidth - 36 - rightSigWidth;
 
-    doc.text(
-      `Total Paid: Rs ${formatMoney(totalPaidGross)}`,
-      rightBoxX + 6,
-      by
-    );
-    by += lineH;
-
-    doc.text(
-      `Refunded (incl. this): Rs ${formatMoney(refundedTillThis)}`,
-      rightBoxX + 6,
-      by
-    );
-    by += lineH;
-
-    doc.text(
-      `Balance: Rs ${formatMoney(balanceAfterThis)}`,
-      rightBoxX + 6,
-      by
-    );
-
-    const sigY = boxY + boxHeight + 40;
-    const sigWidth = 160;
-
-    doc
-      .moveTo(36, sigY)
-      .lineTo(36 + sigWidth, sigY)
-      .dash(1, { space: 2 })
-      .stroke()
-      .undash();
-    doc.fontSize(8).text("Patient / Representative", 36, sigY + 4, {
-      width: sigWidth,
-      align: "center",
-    });
-
-    const rightSigX = pageWidth - 36 - sigWidth;
     doc
       .moveTo(rightSigX, sigY)
-      .lineTo(rightSigX + sigWidth, sigY)
+      .lineTo(rightSigX + rightSigWidth, sigY)
       .dash(1, { space: 2 })
       .stroke()
       .undash();
     doc
       .fontSize(8)
       .text("For Madhurekha Eye Care Centre", rightSigX, sigY + 4, {
-        width: sigWidth,
+        width: rightSigWidth,
         align: "center",
       });
 
     doc.end();
   } catch (err) {
-    console.error("refund-html-pdf error:", err);
+    console.error("summary-pdf error:", err);
     if (!res.headersSent) {
-      res.status(500).json({ error: "Failed to generate refund PDF" });
+      res.status(500).json({ error: "Failed to generate summary PDF" });
     }
   }
 });
 
-// ---------- GET /api/dashboard/summary ----------
 app.get("/api/dashboard/summary", async (_req, res) => {
   try {
     const key = makeCacheKey("dashboard", "summary");
@@ -1953,7 +2434,7 @@ app.get("/api/dashboard/summary", async (_req, res) => {
   }
 });
 
-// ---------- PDF: Bill Summary (A4 half page) ----------
+// ---------- PDF: Bill Summary (A4 half page with chronological table) ----------
 app.get("/api/bills/:id/summary-pdf", async (req, res) => {
   const billId = req.params.id;
   if (!billId) return res.status(400).json({ error: "Invalid bill id" });
@@ -1968,6 +2449,7 @@ app.get("/api/bills/:id/summary-pdf", async (req, res) => {
 
     const billTotal = Number(bill.total || 0);
 
+    // --- PAYMENTS ---
     const paysSnap = await db
       .collection("payments")
       .where("billId", "==", billId)
@@ -1982,6 +2464,9 @@ app.get("/api/bills/:id/summary-pdf", async (req, res) => {
         id: doc.id,
         amount: Number(d.amount || 0),
         paymentDateTime,
+        mode: d.mode || "",
+        referenceNo: d.referenceNo || null,
+        receiptNo: d.receiptNo || null,
       };
     });
 
@@ -1996,6 +2481,7 @@ app.get("/api/bills/:id/summary-pdf", async (req, res) => {
       0
     );
 
+    // --- REFUNDS ---
     const refundsSnap = await db
       .collection("refunds")
       .where("billId", "==", billId)
@@ -2010,14 +2496,15 @@ app.get("/api/bills/:id/summary-pdf", async (req, res) => {
         id: doc.id,
         amount: Number(d.amount || 0),
         refundDateTime,
+        mode: d.mode || "",
+        referenceNo: d.referenceNo || null,
+        refundNo: d.refundReceiptNo || null,
       };
     });
 
     refunds.sort((a, b) => {
       const da = a.refundDateTime ? new Date(a.refundDateTime) : new Date(0);
-      const dbb = b.refundDateTime
-        ? new Date(b.refundDateTime)
-        : new Date(0);
+      const dbb = b.refundDateTime ? new Date(b.refundDateTime) : new Date(0);
       return da - dbb;
     });
 
@@ -2041,6 +2528,65 @@ app.get("/api/bills/:id/summary-pdf", async (req, res) => {
       return Number(v || 0).toFixed(2);
     }
 
+    function formatDateTime(dtString) {
+      if (!dtString) return "";
+      const d = new Date(dtString);
+      if (Number.isNaN(d.getTime())) return "";
+      const yyyy = d.getFullYear();
+      const mm = String(d.getMonth() + 1).padStart(2, "0");
+      const dd = String(d.getDate()).padStart(2, "0");
+      const hh = String(d.getHours()).padStart(2, "0");
+      const mi = String(d.getMinutes()).padStart(2, "0");
+      return `${yyyy}-${mm}-${dd} ${hh}:${mi}`;
+    }
+
+    // --------- BUILD CHRONOLOGICAL TIMELINE ---------
+    const timeline = [];
+
+    const invoiceDateTime =
+      bill.createdAt || (bill.date ? `${bill.date}T00:00:00.000Z` : null);
+
+    timeline.push({
+      type: "INVOICE",
+      label: "Invoice Generated",
+      dateTime: invoiceDateTime,
+      mode: "-",
+      ref: invoiceNo,
+      debit: billTotal,
+      credit: 0,
+    });
+
+    payments.forEach((p) => {
+      timeline.push({
+        type: "PAYMENT",
+        label: p.receiptNo ? `Payment Receipt (${p.receiptNo})` : "Payment",
+        dateTime: p.paymentDateTime,
+        mode: p.mode || "",
+        ref: p.referenceNo || "",
+        debit: 0,
+        credit: p.amount,
+      });
+    });
+
+    refunds.forEach((r) => {
+      timeline.push({
+        type: "REFUND",
+        label: r.refundNo ? `Refund (${r.refundNo})` : "Refund",
+        dateTime: r.refundDateTime,
+        mode: r.mode || "",
+        ref: r.referenceNo || "",
+        debit: r.amount,
+        credit: 0,
+      });
+    });
+
+    timeline.sort((a, b) => {
+      const da = a.dateTime ? new Date(a.dateTime) : new Date(0);
+      const dbb = b.dateTime ? new Date(b.dateTime) : new Date(0);
+      return da - dbb;
+    });
+
+    // ---------- PDF START ----------
     res.setHeader("Content-Type", "application/pdf");
     res.setHeader(
       "Content-Disposition",
@@ -2084,7 +2630,7 @@ app.get("/api/bills/:id/summary-pdf", async (req, res) => {
       .font("Helvetica")
       .fontSize(9)
       .text(
-        "SONARI: E-501, Sonari East Layout, Near Subzi Sangh, Kali Puja Maidan, Jamshedpur - 831011",
+        "SONARI: E-501, Sonari East Layout, Near Sabuz Sangh Kali Puja Maidan, Jamshedpur - 831011",
         0,
         y + 20,
         {
@@ -2099,11 +2645,38 @@ app.get("/api/bills/:id/summary-pdf", async (req, res) => {
 
     y += 48;
 
-    doc.moveTo(36, y).lineTo(pageWidth - 36, y).stroke();
-
+    doc
+      .moveTo(36, y)
+      .lineTo(pageWidth - 36, y)
+      .stroke();
     y += 6;
 
-    doc.rect(36, y, usableWidth, 16).stroke();
+    // static doctor header
+    doc.font("Helvetica-Bold").fontSize(9);
+    doc.text("Dr. Pradipta Kundu", 36, y);
+    doc.text("Dr. (Mrs.) Amita Kundu", pageWidth / 2, y, {
+      align: "right",
+      width: usableWidth / 2,
+    });
+
+    y += 12;
+    doc.font("Helvetica").fontSize(8);
+    doc.text("Reg. No.: 28873", 36, y);
+    doc.text("Reg. No.: 16219", pageWidth / 2, y, {
+      align: "right",
+      width: usableWidth / 2,
+    });
+
+    y += 16;
+
+    // title bar
+    doc
+      .save()
+      .rect(36, y, usableWidth, 16)
+      .fill("#F3F3F3")
+      .restore()
+      .rect(36, y, usableWidth, 16)
+      .stroke();
 
     doc
       .font("Helvetica-Bold")
@@ -2115,6 +2688,7 @@ app.get("/api/bills/:id/summary-pdf", async (req, res) => {
 
     y += 24;
 
+    // invoice / patient line
     doc.font("Helvetica").fontSize(9);
     doc.text(`Invoice No.: ${invoiceNo}`, 36, y);
     doc.text(`Date: ${billDate}`, pageWidth / 2, y, {
@@ -2130,12 +2704,115 @@ app.get("/api/bills/:id/summary-pdf", async (req, res) => {
 
     y += 18;
 
+    // --------- CHRONOLOGICAL TABLE ---------
+    const tableLeft = 36;
+    const colDateW = 80;
+    const colPartW = 150;
+    const colModeW = 60;
+    const colRefW = 80;
+    const colDebitW = 50;
+    const colCreditW = 50;
+    const colBalW =
+      usableWidth -
+      (colDateW + colPartW + colModeW + colRefW + colDebitW + colCreditW);
+
+    const colDateX = tableLeft;
+    const colPartX = colDateX + colDateW;
+    const colModeX = colPartX + colPartW;
+    const colRefX = colModeX + colModeW;
+    const colDebitX = colRefX + colRefW;
+    const colCreditX = colDebitX + colDebitW;
+    const colBalX = colCreditX + colCreditW;
+
+    // header background
+    doc
+      .save()
+      .rect(tableLeft, y, usableWidth, 16)
+      .fill("#F3F3F3")
+      .restore()
+      .rect(tableLeft, y, usableWidth, 16)
+      .stroke();
+
+    doc.font("Helvetica-Bold").fontSize(8);
+    doc.text("Date & Time", colDateX + 2, y + 3, {
+      width: colDateW - 4,
+    });
+    doc.text("Particulars", colPartX + 2, y + 3, {
+      width: colPartW - 4,
+    });
+    doc.text("Mode", colModeX + 2, y + 3, {
+      width: colModeW - 4,
+    });
+    doc.text("Reference", colRefX + 2, y + 3, {
+      width: colRefW - 4,
+    });
+    doc.text("Debit (Rs)", colDebitX + 2, y + 3, {
+      width: colDebitW - 4,
+      align: "right",
+    });
+    doc.text("Credit (Rs)", colCreditX + 2, y + 3, {
+      width: colCreditW - 4,
+      align: "right",
+    });
+    doc.text("Balance (Rs)", colBalX + 2, y + 3, {
+      width: colBalW - 4,
+      align: "right",
+    });
+
+    y += 16;
+    doc.font("Helvetica").fontSize(8);
+
+    let runningBalance = 0;
+
+    timeline.forEach((ev) => {
+      const rowHeight = 14;
+
+      doc.rect(tableLeft, y, usableWidth, rowHeight).stroke();
+
+      if (ev.type === "INVOICE") {
+        runningBalance = ev.debit - ev.credit;
+      } else {
+        runningBalance += ev.debit;
+        runningBalance -= ev.credit;
+      }
+
+      doc.text(formatDateTime(ev.dateTime), colDateX + 2, y + 3, {
+        width: colDateW - 4,
+      });
+      doc.text(ev.label || "", colPartX + 2, y + 3, {
+        width: colPartW - 4,
+      });
+      doc.text(ev.mode || "", colModeX + 2, y + 3, {
+        width: colModeW - 4,
+      });
+      doc.text(ev.ref || "", colRefX + 2, y + 3, {
+        width: colRefW - 4,
+      });
+      doc.text(ev.debit ? formatMoney(ev.debit) : "", colDebitX + 2, y + 3, {
+        width: colDebitW - 4,
+        align: "right",
+      });
+      doc.text(ev.credit ? formatMoney(ev.credit) : "", colCreditX + 2, y + 3, {
+        width: colCreditW - 4,
+        align: "right",
+      });
+      doc.text(formatMoney(runningBalance), colBalX + 2, y + 3, {
+        width: colBalW - 4,
+        align: "right",
+      });
+
+      y += rowHeight;
+    });
+
+    y += 18;
+
+    // --------- TOTALS BOX ---------
     const boxWidth = 260;
     const boxX = 36;
     const boxY = y;
-    const lineH = 12;
-    const rows = 8;
-    const boxHeight = lineH * rows + 8;
+    const lineH2 = 12;
+    const rows2 = 8;
+    const boxHeight = lineH2 * rows2 + 8;
 
     doc.rect(boxX, boxY, boxWidth, boxHeight).stroke();
 
@@ -2149,7 +2826,7 @@ app.get("/api/bills/:id/summary-pdf", async (req, res) => {
         width: boxWidth - 12,
         align: "right",
       });
-      by += lineH;
+      by += lineH2;
     }
 
     row("Bill Total", `Rs ${formatMoney(billTotal)}`);
@@ -2186,6 +2863,169 @@ app.get("/api/bills/:id/summary-pdf", async (req, res) => {
     }
   }
 });
+
+
+// ---------- PUT /api/bills/:id (edit bill: patient + services, NOT payments) ----------
+app.put("/api/bills/:id", async (req, res) => {
+  const billId = req.params.id;
+  if (!billId) return res.status(400).json({ error: "Invalid bill id" });
+
+  try {
+    const billRef = db.collection("bills").doc(billId);
+    const billSnap = await billRef.get();
+
+    if (!billSnap.exists) {
+      return res.status(404).json({ error: "Bill not found" });
+    }
+
+    const oldBill = billSnap.data();
+
+    // Editable fields from frontend (everything except payment info)
+    const {
+      patientName,
+      sex,
+      address,
+      age,
+      date,
+      doctorReg1,
+      doctorReg2,
+      adjust,
+      remarks,
+      services,
+    } = req.body;
+
+    const jsDate = date || oldBill.date || new Date().toISOString().slice(0, 10);
+
+    // --- NORMALIZE SERVICES (same style as POST /api/bills) ---
+    const normalizedServices = Array.isArray(services)
+      ? services.map((s) => {
+          const qty = Number(s.qty) || 0;
+          const rate = Number(s.rate) || 0;
+          const amount = qty * rate;
+          return {
+            item: s.item || "",
+            details: s.details || "",
+            qty,
+            rate,
+            amount,
+          };
+        })
+      : [];
+
+    const itemsData = normalizedServices.map((s) => {
+      const parts = [];
+      if (s.item) parts.push(s.item);
+      if (s.details) parts.push(s.details);
+      const description = parts.join(" - ") || "";
+      return {
+        description,
+        qty: s.qty,
+        rate: s.rate,
+        amount: s.amount,
+      };
+    });
+
+    const subtotal = itemsData.reduce((sum, it) => sum + Number(it.amount || 0), 0);
+    const adj = Number(adjust ?? oldBill.adjust ?? 0) || 0;
+    const total = subtotal + adj;
+
+    // keep payments/refunds as is
+    const paidGross = Number(oldBill.paid || 0);
+    const refunded = Number(oldBill.refunded || 0);
+    const effectivePaid = paidGross - refunded;
+    const balance = total - effectivePaid;
+    const status = computeStatus(total, effectivePaid);
+
+    const batch = db.batch();
+
+    // 1) Update bill doc
+    batch.update(billRef, {
+      patientName: patientName ?? oldBill.patientName ?? "",
+      sex: sex ?? oldBill.sex ?? null,
+      address: address ?? oldBill.address ?? "",
+      age: typeof age !== "undefined" ? Number(age) : oldBill.age ?? null,
+      date: jsDate,
+      doctorReg1: doctorReg1 ?? oldBill.doctorReg1 ?? null,
+      doctorReg2: doctorReg2 ?? oldBill.doctorReg2 ?? null,
+      subtotal,
+      adjust: adj,
+      total,
+      paid: paidGross,
+      refunded,
+      balance,
+      status,
+      remarks: typeof remarks !== "undefined" ? remarks : oldBill.remarks ?? null,
+      services: normalizedServices,
+    });
+
+    // 2) Replace items collection for this bill
+    const existingItemsSnap = await db
+      .collection("items")
+      .where("billId", "==", billId)
+      .get();
+
+    existingItemsSnap.forEach((doc) => {
+      batch.delete(doc.ref);
+    });
+
+    itemsData.forEach((item) => {
+      const itemRef = db.collection("items").doc();
+      batch.set(itemRef, {
+        billId,
+        ...item,
+      });
+    });
+
+    await batch.commit();
+
+    // clear caches so GET /api/bills and /api/bills/:id show updated data
+    cache.flushAll();
+
+    // update Google Sheet (optional but consistent with create)
+    syncBillToSheet({
+      id: billId,
+      invoiceNo: oldBill.invoiceNo || billId,
+      patientName: patientName ?? oldBill.patientName ?? "",
+      address: address ?? oldBill.address ?? "",
+      age: typeof age !== "undefined" ? Number(age) : oldBill.age ?? null,
+      date: jsDate,
+      doctorReg1: doctorReg1 ?? oldBill.doctorReg1 ?? null,
+      doctorReg2: doctorReg2 ?? oldBill.doctorReg2 ?? null,
+      subtotal,
+      adjust: adj,
+      total,
+      paid: paidGross,
+      refunded,
+      balance,
+      status,
+    });
+
+    syncItemsToSheet(billId, billId, patientName ?? oldBill.patientName ?? "", itemsData);
+
+    res.json({
+      id: billId,
+      invoiceNo: oldBill.invoiceNo || billId,
+      patientName: patientName ?? oldBill.patientName ?? "",
+      sex: sex ?? oldBill.sex ?? null,
+      address: address ?? oldBill.address ?? "",
+      age: typeof age !== "undefined" ? Number(age) : oldBill.age ?? null,
+      date: jsDate,
+      subtotal,
+      adjust: adj,
+      total,
+      paid: paidGross,
+      refunded,
+      balance,
+      status,
+      remarks: typeof remarks !== "undefined" ? remarks : oldBill.remarks ?? null,
+      services: normalizedServices,
+    });
+  } catch (err) {
+    console.error("PUT /api/bills/:id error:", err);
+    res.status(500).json({ error: "Failed to update bill" });
+  }
+});
+
 
 // ---------- START SERVER ----------
 app.listen(PORT, () => {
