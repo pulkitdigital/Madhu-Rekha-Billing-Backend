@@ -1081,6 +1081,7 @@ app.get("/api/bills/:id/invoice-html-pdf", async (req, res) => {
     const patientName = bill.patientName || "";
     const ageText =
       bill.age != null && bill.age !== "" ? `${bill.age} Years` : "";
+    const sexText = bill.sex ? String(bill.sex) : "";
 
     const paymentMode = primaryPayment?.mode || "Cash";
     const referenceNo = primaryPayment?.referenceNo || null;
@@ -1188,6 +1189,7 @@ app.get("/api/bills/:id/invoice-html-pdf", async (req, res) => {
 
     doc.font("Helvetica").fontSize(9);
 
+    // Invoice + Date row
     doc.text(`Invoice No.: ${invoiceNo}`, 36, y);
     doc.text(`Date: ${dateText}`, pageWidth / 2, y, {
       align: "right",
@@ -1196,6 +1198,7 @@ app.get("/api/bills/:id/invoice-html-pdf", async (req, res) => {
 
     y += 12;
 
+    // Mr/Mrs + Age row
     doc.text(`Mr./Mrs.: ${patientName}`, 36, y, {
       width: usableWidth * 0.6,
     });
@@ -1208,9 +1211,16 @@ app.get("/api/bills/:id/invoice-html-pdf", async (req, res) => {
 
     y += 12;
 
+    // Address + Sex row (sex nayi line pe, address ke saath)
     doc.text(`Address: ${bill.address || "________________________"}`, 36, y, {
-      width: usableWidth,
+      width: usableWidth * 0.6,
     });
+    if (sexText) {
+      doc.text(`Sex: ${sexText}`, pageWidth / 2, y, {
+        align: "right",
+        width: usableWidth / 2,
+      });
+    }
 
     y += 20;
 
@@ -1402,16 +1412,16 @@ app.get("/api/bills/:id/invoice-html-pdf", async (req, res) => {
       align: "center",
     });
 
-    const rightSigX = pageWidth - 36 - sigWidth;
+    const rightSigX2 = pageWidth - 36 - sigWidth;
     doc
-      .moveTo(rightSigX, sigY)
-      .lineTo(rightSigX + sigWidth, sigY)
+      .moveTo(rightSigX2, sigY)
+      .lineTo(rightSigX2 + sigWidth, sigY)
       .dash(1, { space: 2 })
       .stroke()
       .undash();
     doc
       .fontSize(8)
-      .text("For Madhurekha Eye Care Centre", rightSigX, sigY + 4, {
+      .text("For Madhurekha Eye Care Centre", rightSigX2, sigY + 4, {
         width: sigWidth,
         align: "center",
       });
@@ -1424,6 +1434,7 @@ app.get("/api/bills/:id/invoice-html-pdf", async (req, res) => {
     }
   }
 });
+
 
 // ---------- PDF: Payment Receipt (A4 half page, professional layout) ----------
 app.get("/api/payments/:id/receipt-html-pdf", async (req, res) => {
