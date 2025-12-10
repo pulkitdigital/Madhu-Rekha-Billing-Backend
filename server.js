@@ -61,7 +61,8 @@ function computeStatus(total, paidEffective) {
   return "PENDING";
 }
 
-// --------- ID HELPERS (FINANCIAL YEAR + SEQUENCES) ----------
+
+// --------- ID HELPERS (FINANCIAL YEAR + SEQUENCES, NO COUNTERS COLLECTION) ----------
 
 // Returns "25-26" for FY 2025-26 based on Indian FY (Apr–Mar)
 function getFinancialYearCode(dateStrOrDate) {
@@ -78,54 +79,72 @@ function getFinancialYearCode(dateStrOrDate) {
   return `${fyStartShort}-${fyEndShort}`; // e.g., "25-26"
 }
 
-// Get next sequence number from Firestore counters doc, safely
-async function getNextSequence(key) {
-  const ref = db.collection("counters").doc(key);
-  const nextSeq = await db.runTransaction(async (tx) => {
-    const snap = await tx.get(ref);
-    const current = snap.exists ? Number(snap.data().seq || 0) : 0;
-    const updated = current + 1;
-    tx.set(ref, { seq: updated }, { merge: true });
-    return updated;
-  });
-  return nextSeq;
-}
-
-// Generate invoice number: "25-26/INV-0001"
+// Generate invoice number WITHOUT counters collection
+//  -> Looks at existing bills of that FY and picks next serial.
 async function generateInvoiceNumber(billDateInput) {
   const dateStr = billDateInput || new Date().toISOString().slice(0, 10);
   const fy = getFinancialYearCode(dateStr);
-  const seq = await getNextSequence(`invoice-${fy}`);
-  const serial = String(seq).padStart(4, "0");
-  const invoiceNo = `${fy}/INV-${serial}`; // e.g. "25-26/INV-0001"
+  const prefix = `${fy}/INV-`;
+
+  const snap = await db
+    .collection("bills")
+    .where("invoiceNo", ">=", prefix)
+    .where("invoiceNo", "<=", prefix + "\uf8ff")
+    .orderBy("invoiceNo", "desc")
+    .limit(1)
+    .get();
+
+  let nextNumber = 1;
+  if (!snap.empty) {
+    const last = snap.docs[0].data().invoiceNo || "";
+    // last is like "25-26/INV-0005"
+    const parts = last.split("-");
+    const serialStr = parts[1] || "0000";
+    const current = Number(serialStr) || 0;
+    nextNumber = current + 1;
+  }
+
+  const serial = String(nextNumber).padStart(4, "0");
+  const invoiceNo = `${fy}/INV-${serial}`;
 
   return { invoiceNo, fy, serial };
 }
 
 // Parse "25-26/INV-0001" into { fy: "25-26", invoiceSerial: "0001" }
 function parseInvoiceNumber(invoiceNo) {
-  // expecting "25-26/INV-0001"
   const [fy, rest] = (invoiceNo || "").split("/");
-  if (!fy || !rest) {
-    return { fy: "00-00", invoiceSerial: "0000" };
-  }
+  if (!fy || !rest) return { fy: "00-00", invoiceSerial: "0000" };
   const parts = rest.split("-");
   const invoiceSerial = parts[1] || "0000";
   return { fy, invoiceSerial };
 }
 
-// Generate receipt id: "25-26/INV-0001/Rec-0001"
-async function generateReceiptId(invoiceNo) {
+// Generate receipt id per invoice WITHOUT counters collection
+// Uses how many payments exist for that bill.
+async function generateReceiptId(invoiceNo, billId) {
   const { fy, invoiceSerial } = parseInvoiceNumber(invoiceNo);
-  const seq = await getNextSequence(`receipt-${fy}-${invoiceSerial}`);
+
+  const snap = await db
+    .collection("payments")
+    .where("billId", "==", billId)
+    .get();
+
+  const seq = snap.size + 1; // next receipt no for this bill
   const recSerial = String(seq).padStart(4, "0");
   return `${fy}/INV-${invoiceSerial}/REC-${recSerial}`;
 }
 
-// Generate refund id: "25-26/INV-0001/REF-0001"
-async function generateRefundId(invoiceNo) {
+// Generate refund id per invoice WITHOUT counters collection
+// Uses how many refunds exist for that bill.
+async function generateRefundId(invoiceNo, billId) {
   const { fy, invoiceSerial } = parseInvoiceNumber(invoiceNo);
-  const seq = await getNextSequence(`refund-${fy}-${invoiceSerial}`);
+
+  const snap = await db
+    .collection("refunds")
+    .where("billId", "==", billId)
+    .get();
+
+  const seq = snap.size + 1; // next refund no for this bill
   const refSerial = String(seq).padStart(4, "0");
   return `${fy}/INV-${invoiceSerial}/REF-${refSerial}`;
 }
@@ -208,6 +227,248 @@ app.get("/api/bills", async (_req, res) => {
 });
 
 // ---------- POST /api/bills (create bill + optional first payment) ----------
+// app.post("/api/bills", async (req, res) => {
+//   try {
+//     const {
+//       patientName,
+//       sex,
+//       address,
+//       age,
+//       date,
+//       doctorReg1,
+//       doctorReg2,
+//       adjust,
+//       pay,
+//       paymentMode,
+//       referenceNo,
+
+//       // NEW – mode-specific payment fields from CreateBill
+//       chequeDate,
+//       chequeNumber,
+//       bankName,
+//       transferType,
+//       transferDate,
+//       upiName,
+//       upiId,
+//       upiDate,
+
+//       drawnOn,
+//       drawnAs,
+
+//       // generic remarks
+//       remarks,
+
+//       // service rows from CreateBill
+//       services,
+//     } = req.body;
+
+//     const jsDate = date || new Date().toISOString().slice(0, 10);
+
+//     // NORMALIZE services array to a consistent shape
+//     const normalizedServices = Array.isArray(services)
+//       ? services.map((s) => {
+//           const qty = Number(s.qty) || 0;
+//           const rate = Number(s.rate) || 0;
+//           const amount = qty * rate;
+//           return {
+//             item: s.item || "",
+//             details: s.details || "",
+//             qty,
+//             rate,
+//             amount,
+//           };
+//         })
+//       : [];
+
+//     // ITEMS table data (for legacy items collection)
+//     const itemsData = normalizedServices.map((s) => {
+//       const parts = [];
+//       if (s.item) parts.push(s.item);
+//       if (s.details) parts.push(s.details);
+//       const description = parts.join(" - ") || "";
+//       return {
+//         description,
+//         qty: s.qty,
+//         rate: s.rate,
+//         amount: s.amount,
+//       };
+//     });
+
+//     const subtotal = itemsData.reduce((sum, it) => sum + Number(it.amount), 0);
+//     const adj = Number(adjust) || 0;
+//     const total = subtotal + adj;
+
+//     const firstPay = Number(pay) || 0;
+//     const refunded = 0;
+//     const effectivePaid = firstPay - refunded;
+//     const balance = total - effectivePaid;
+//     const status = computeStatus(total, effectivePaid);
+
+//     // NEW: invoice number based on financial year + sequence
+//     const { invoiceNo, fy, serial } = await generateInvoiceNumber(jsDate);
+//     const billId = invoiceNo.replace(/\//g, "_"); // e.g. "25-26/INV-0001"
+//     const createdAt = new Date().toISOString();
+
+//     const billRef = db.collection("bills").doc(billId);
+
+//     const batch = db.batch();
+
+//     // 1) Bill
+//     batch.set(billRef, {
+//       patientName: patientName || "",
+//       sex: sex || null,
+//       address: address || "",
+//       age: age ? Number(age) : null,
+//       date: jsDate,
+//       invoiceNo: invoiceNo,
+//       doctorReg1: doctorReg1 || null,
+//       doctorReg2: doctorReg2 || null,
+//       subtotal,
+//       adjust: adj,
+//       total,
+//       paid: firstPay,
+//       refunded,
+//       balance,
+//       status,
+//       createdAt,
+//       remarks: remarks || null,
+//       // store normalized services on the bill for PDFs / future UI
+//       services: normalizedServices,
+//     });
+
+//     // 2) Items collection (1 doc per item row)
+//     itemsData.forEach((item, index) => {
+//       const lineNo = index + 1;
+//       const itemId = `${billId}-${String(lineNo).padStart(2, "0")}`;
+
+//       const qty = Number(item.qty || 0);
+//       const rate = Number(item.rate || 0);
+//       const amount = qty * rate;
+
+//       const itemRef = db.collection("items").doc(itemId);
+
+//       batch.set(itemRef, {
+//         billId,
+//         patientName: patientName,
+//         description: item.description || item.item || "",
+//         qty,
+//         rate,
+//         amount,
+//       });
+//     });
+
+//     // 3) Optional first payment
+//     let paymentDoc = null;
+//     let receiptDoc = null;
+
+//     if (firstPay > 0) {
+//       // NEW: receipt id based on invoice id
+//       const receiptNo = await generateReceiptId(invoiceNo); // 25-26/INV-0001/Rec-0001
+//       const paymentId = receiptNo.replace(/\//g, "_");
+//       const paymentRef = db.collection("payments").doc(invoiceNo);
+//       const now = new Date();
+//       const paymentDate = jsDate;
+//       const paymentTime = now.toTimeString().slice(0, 5);
+//       const paymentDateTime = now.toISOString();
+
+//       paymentDoc = {
+//         billId,
+//         amount: firstPay,
+//         mode: paymentMode || "Cash",
+//         referenceNo: referenceNo || null,
+//         drawnOn: drawnOn || null,
+//         drawnAs: drawnAs || null,
+
+//         // persist mode-specific extras for first payment too
+//         chequeDate: chequeDate || null,
+//         chequeNumber: chequeNumber || null,
+//         bankName: bankName || null,
+
+//         transferType: transferType || null,
+//         transferDate: transferDate || null,
+
+//         upiName: upiName || null,
+//         upiId: upiId || null,
+//         upiDate: upiDate || null,
+
+//         paymentDate,
+//         paymentTime,
+//         paymentDateTime,
+//         receiptNo,
+//       };
+
+//       batch.set(paymentRef, paymentDoc);
+//       receiptDoc = { id: paymentId, receiptNo };
+//     }
+
+//     await batch.commit();
+
+//     // invalidate cache on write
+//     cache.flushAll();
+
+//     // async fire-and-forget (no await)
+//     syncBillToSheet({
+//       id: billId,
+//       invoiceNo: invoiceNo,
+//       patientName,
+//       address,
+//       age: age ? Number(age) : null,
+//       date: jsDate,
+//       subtotal,
+//       adjust: adj,
+//       total,
+//       paid: firstPay,
+//       refunded,
+//       balance,
+//       status,
+//       sex: sex || null,
+//     });
+
+//     syncItemsToSheet(billId, billId, patientName, itemsData);
+
+//     res.json({
+//       bill: {
+//         id: billId,
+//         invoiceNo: invoiceNo,
+//         patientName: patientName || "",
+//         sex: sex || null,
+//         address: address || "",
+//         age: age ? Number(age) : null,
+//         date: jsDate,
+//         doctorReg1: doctorReg1 || null,
+//         doctorReg2: doctorReg2 || null,
+//         subtotal,
+//         adjust: adj,
+//         total,
+//         paid: firstPay,
+//         refunded,
+//         balance,
+//         status,
+//         remarks: remarks || null,
+//         services: normalizedServices,
+//         paymentMode: paymentDoc?.mode || null,
+//         referenceNo: paymentDoc?.referenceNo || null,
+//         drawnOn: paymentDoc?.drawnOn || null,
+//         drawnAs: paymentDoc?.drawnAs || null,
+//         chequeDate: paymentDoc?.chequeDate || null,
+//         chequeNumber: paymentDoc?.chequeNumber || null,
+//         bankName: paymentDoc?.bankName || null,
+//         transferType: paymentDoc?.transferType || null,
+//         transferDate: paymentDoc?.transferDate || null,
+//         upiName: paymentDoc?.upiName || null,
+//         upiId: paymentDoc?.upiId || null,
+//         upiDate: paymentDoc?.upiDate || null,
+//       },
+//       payment: paymentDoc,
+//       receipt: receiptDoc,
+//     });
+//   } catch (err) {
+//     console.error("POST /api/bills error:", err);
+//     res.status(500).json({ error: "Failed to create bill" });
+//   }
+// });
+
+// ---------- POST /api/bills (create bill + optional first payment) ----------
 app.post("/api/bills", async (req, res) => {
   try {
     const {
@@ -245,7 +506,7 @@ app.post("/api/bills", async (req, res) => {
 
     const jsDate = date || new Date().toISOString().slice(0, 10);
 
-    // NORMALIZE services array to a consistent shape
+    // 1) SERVICES ko normalize karo
     const normalizedServices = Array.isArray(services)
       ? services.map((s) => {
           const qty = Number(s.qty) || 0;
@@ -261,7 +522,7 @@ app.post("/api/bills", async (req, res) => {
         })
       : [];
 
-    // ITEMS table data (for legacy items collection)
+    // 2) ITEMS DATA – items collection + sheet ke liye
     const itemsData = normalizedServices.map((s) => {
       const parts = [];
       if (s.item) parts.push(s.item);
@@ -275,7 +536,11 @@ app.post("/api/bills", async (req, res) => {
       };
     });
 
-    const subtotal = itemsData.reduce((sum, it) => sum + Number(it.amount), 0);
+    // 3) Totals
+    const subtotal = itemsData.reduce(
+      (sum, it) => sum + Number(it.amount || 0),
+      0
+    );
     const adj = Number(adjust) || 0;
     const total = subtotal + adj;
 
@@ -285,16 +550,15 @@ app.post("/api/bills", async (req, res) => {
     const balance = total - effectivePaid;
     const status = computeStatus(total, effectivePaid);
 
-    // NEW: invoice number based on financial year + sequence
-    const { invoiceNo, fy, serial } = await generateInvoiceNumber(jsDate);
-    const billId = invoiceNo.replace(/\//g, "_"); // e.g. "25-26/INV-0001"
+    // 4) Invoice no + billId generate
+    const { invoiceNo } = await generateInvoiceNumber(jsDate);
+    const billId = invoiceNo.replace(/\//g, "_"); // e.g. "25-26_INV-0001"
     const createdAt = new Date().toISOString();
 
     const billRef = db.collection("bills").doc(billId);
-
     const batch = db.batch();
 
-    // 1) Bill
+    // 5) Bill document
     batch.set(billRef, {
       patientName: patientName || "",
       sex: sex || null,
@@ -317,24 +581,37 @@ app.post("/api/bills", async (req, res) => {
       services: normalizedServices,
     });
 
-    // 2) Items collection (legacy)
-    itemsData.forEach((item) => {
-      const itemRef = db.collection("items").doc();
+    // 6) Items collection (1 doc per item row)
+    itemsData.forEach((item, index) => {
+      const lineNo = index + 1;
+      const itemId = `${billId}-${String(lineNo).padStart(2, "0")}`;
+
+      const qty = Number(item.qty || 0);
+      const rate = Number(item.rate || 0);
+      const amount = qty * rate;
+
+      const itemRef = db.collection("items").doc(itemId);
+
       batch.set(itemRef, {
         billId,
-        ...item,
+        patientName: patientName || "",
+        description: item.description || "",
+        qty,
+        rate,
+        amount,
       });
     });
 
-    // 3) Optional first payment
+    // 7) Optional first payment
     let paymentDoc = null;
     let receiptDoc = null;
 
     if (firstPay > 0) {
-      // NEW: receipt id based on invoice id
-      const receiptNo = await generateReceiptId(invoiceNo); // 25-26/INV-0001/Rec-0001
-      const paymentId = receiptNo.replace(/\//g, "_");
-      const paymentRef = db.collection("payments").doc();
+      // receipt id based on invoice + bill
+      const receiptNo = await generateReceiptId(invoiceNo, billId);
+      const paymentId = receiptNo.replace(/\//g, "_"); // 25-26_INV-0001_REC-0001
+      const paymentRef = db.collection("payments").doc(paymentId);
+
       const now = new Date();
       const paymentDate = jsDate;
       const paymentTime = now.toTimeString().slice(0, 5);
@@ -348,7 +625,7 @@ app.post("/api/bills", async (req, res) => {
         drawnOn: drawnOn || null,
         drawnAs: drawnAs || null,
 
-        // persist mode-specific extras for first payment too
+        // mode-specific extras
         chequeDate: chequeDate || null,
         chequeNumber: chequeNumber || null,
         bankName: bankName || null,
@@ -372,10 +649,10 @@ app.post("/api/bills", async (req, res) => {
 
     await batch.commit();
 
-    // invalidate cache on write
+    // cache clear
     cache.flushAll();
 
-    // async fire-and-forget (no await)
+    // 8) Sheets sync (fire-and-forget)
     syncBillToSheet({
       id: billId,
       invoiceNo: invoiceNo,
@@ -393,8 +670,19 @@ app.post("/api/bills", async (req, res) => {
       sex: sex || null,
     });
 
-    syncItemsToSheet(billId, billId, patientName, itemsData);
+    syncItemsToSheet(
+      billId,
+      billId,
+      patientName,
+      itemsData.map((it) => ({
+        description: it.description,
+        qty: it.qty,
+        rate: it.rate,
+        amount: it.amount,
+      }))
+    );
 
+    // 9) Response
     res.json({
       bill: {
         id: billId,
@@ -436,6 +724,7 @@ app.post("/api/bills", async (req, res) => {
     res.status(500).json({ error: "Failed to create bill" });
   }
 });
+
 
 // ---------- GET /api/bills/:id (detail + items + payments + refunds) ----------
 app.get("/api/bills/:id", async (req, res) => {
@@ -1434,7 +1723,6 @@ app.get("/api/bills/:id/invoice-html-pdf", async (req, res) => {
     }
   }
 });
-
 
 // ---------- PDF: Payment Receipt (A4 half page, professional layout) ----------
 app.get("/api/payments/:id/receipt-html-pdf", async (req, res) => {
@@ -2927,6 +3215,7 @@ app.put("/api/bills/:id", async (req, res) => {
         })
       : [];
 
+    // YE data hum ITEMS collection me likhenge
     const itemsData = normalizedServices.map((s) => {
       const parts = [];
       if (s.item) parts.push(s.item);
@@ -2957,8 +3246,10 @@ app.put("/api/bills/:id", async (req, res) => {
     const batch = db.batch();
 
     // 1) Update bill doc
+    const finalPatientName = patientName ?? oldBill.patientName ?? "";
+
     batch.update(billRef, {
-      patientName: patientName ?? oldBill.patientName ?? "",
+      patientName: finalPatientName,
       sex: sex ?? oldBill.sex ?? null,
       address: address ?? oldBill.address ?? "",
       age: typeof age !== "undefined" ? Number(age) : oldBill.age ?? null,
@@ -2978,6 +3269,7 @@ app.put("/api/bills/:id", async (req, res) => {
     });
 
     // 2) Replace items collection for this bill
+    //    (pehle saare old items delete, fir naya set create)
     const existingItemsSnap = await db
       .collection("items")
       .where("billId", "==", billId)
@@ -2987,11 +3279,23 @@ app.put("/api/bills/:id", async (req, res) => {
       batch.delete(doc.ref);
     });
 
-    itemsData.forEach((item) => {
-      const itemRef = db.collection("items").doc();
-      batch.set(itemRef, {
+    // 3) NEW ITEMS INSERT with deterministic ID:
+    //    25-26_INV-0001-01, 25-26_INV-0001-02, ...
+    itemsData.forEach((item, index) => {
+      const lineNo = index + 1;
+      const itemId = `${billId}-${String(lineNo).padStart(2, "0")}`; // e.g. 25-26_INV-0001-01
+
+      const qty = Number(item.qty || 0);
+      const rate = Number(item.rate || 0);
+      const amount = Number(item.amount || qty * rate || 0);
+
+      batch.set(db.collection("items").doc(itemId), {
         billId,
-        ...item,
+        patientName: finalPatientName,
+        description: item.description,
+        qty,
+        rate,
+        amount,
       });
     });
 
@@ -3004,7 +3308,7 @@ app.put("/api/bills/:id", async (req, res) => {
     syncBillToSheet({
       id: billId,
       invoiceNo: oldBill.invoiceNo || billId,
-      patientName: patientName ?? oldBill.patientName ?? "",
+      patientName: finalPatientName,
       address: address ?? oldBill.address ?? "",
       age: typeof age !== "undefined" ? Number(age) : oldBill.age ?? null,
       date: jsDate,
@@ -3021,14 +3325,19 @@ app.put("/api/bills/:id", async (req, res) => {
     syncItemsToSheet(
       billId,
       billId,
-      patientName ?? oldBill.patientName ?? "",
-      itemsData
+      finalPatientName,
+      itemsData.map((it) => ({
+        description: it.description,
+        qty: it.qty,
+        rate: it.rate,
+        amount: it.amount,
+      }))
     );
 
     res.json({
       id: billId,
       invoiceNo: oldBill.invoiceNo || billId,
-      patientName: patientName ?? oldBill.patientName ?? "",
+      patientName: finalPatientName,
       sex: sex ?? oldBill.sex ?? null,
       address: address ?? oldBill.address ?? "",
       age: typeof age !== "undefined" ? Number(age) : oldBill.age ?? null,
@@ -3049,6 +3358,7 @@ app.put("/api/bills/:id", async (req, res) => {
     res.status(500).json({ error: "Failed to update bill" });
   }
 });
+
 
 // ---------- START SERVER ----------
 app.listen(PORT, () => {
