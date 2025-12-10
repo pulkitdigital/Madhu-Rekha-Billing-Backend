@@ -334,7 +334,7 @@ app.post("/api/bills", async (req, res) => {
       // NEW: receipt id based on invoice id
       const receiptNo = await generateReceiptId(invoiceNo); // 25-26/INV-0001/Rec-0001
       const paymentId = receiptNo.replace(/\//g, "_");
-      const paymentRef = db.collection("Receipt").doc();
+      const paymentRef = db.collection("payments").doc();
       const now = new Date();
       const paymentDate = jsDate;
       const paymentTime = now.toTimeString().slice(0, 5);
