@@ -637,6 +637,37 @@ export async function syncDeleteRefundsFromSheet(billId, opts = {}) {
   }
 }
 
+// Replace the entire syncProfileToSheet function with this
+export async function syncProfileToSheet(profileData) {
+  try {
+    // Build a simple row object (flat key-value). Keep it minimal to match your webhook.
+    const row = {
+      timestamp: new Date().toISOString(),
+      clinicName: profileData.clinicName || "",
+      address: profileData.address || "",
+      pan: profileData.pan || "",
+      regNo: profileData.regNo || "",
+      doctor1Name: profileData.doctor1Name || "",
+      doctor1RegNo: profileData.doctor1RegNo || "",
+      doctor2Name: profileData.doctor2Name || "",
+      doctor2RegNo: profileData.doctor2RegNo || "",
+      phone: profileData.phone || "",
+      email: profileData.email || "",
+      website: profileData.website || "",
+      patientRepresentative: profileData.patientRepresentative || "",
+      clinicRepresentative: profileData.clinicRepresentative || "",
+      updatedAt: profileData.updatedAt || "",
+    };
+
+    await postToSheet("profile", row);
+    console.log("Profile synced to Google Sheet (via webhook)");
+  } catch (err) {
+    // **Do not throw** — swallow/log so sheet failures don't crash the server
+    console.warn("Profile sheet sync failed:", err);
+  }
+}
+
+
 /* Export summary (optional convenience) */
 export default {
   syncBillToSheet,
@@ -647,4 +678,5 @@ export default {
   syncDeleteItemsFromSheet,
   syncDeletePaymentsFromSheet,
   syncDeleteRefundsFromSheet,
+  syncProfileToSheet,
 };
