@@ -12178,6 +12178,1005 @@ app.delete("/api/bills/:id", async (req, res) => {
 // });
 
 
+// app.get("/api/bills/:id/full-payment-pdf", async (req, res) => {
+//   const id = req.params.id;
+//   if (!id) return res.status(400).json({ error: "Invalid bill id" });
+
+//   function formatMoney(v) { return Number(v || 0).toFixed(2); }
+
+//   function formatDateOnly(dtString) {
+//     return typeof formatDateDot === "function" ? formatDateDot(dtString) : dtString || "";
+//   }
+
+//   try {
+//     // load bill
+//     const billRef = db.collection("bills").doc(id);
+//     const billSnap = await billRef.get();
+//     if (!billSnap.exists) return res.status(404).json({ error: "Bill not found" });
+//     const bill = billSnap.data();
+
+//     // fetch items (legacy/new combined)
+//     const itemsSnap = await db.collection("items").where("billId", "==", id).get();
+//     const legacyItems = itemsSnap.docs.map((d) => {
+//       const dd = d.data();
+//       return {
+//         id: d.id,
+//         description: dd.description || dd.item || dd.details || "",
+//         qty: Number(dd.qty || 0),
+//         rate: Number(dd.rate || 0),
+//         amount: dd.amount != null ? Number(dd.amount) : Number(dd.qty || 0) * Number(dd.rate || 0),
+//       };
+//     });
+
+//     const serviceItems = Array.isArray(bill.services)
+//       ? bill.services.map((s, idx) => {
+//           const qty = Number(s.qty || 0);
+//           const rate = Number(s.rate || 0);
+//           const amount = s.amount != null ? Number(s.amount) : qty * rate;
+//           const parts = [];
+//           if (s.item) parts.push(s.item);
+//           if (s.details) parts.push(s.details);
+//           return {
+//             id: `svc-${idx + 1}`,
+//             description: parts.join(" - "),
+//             qty,
+//             rate,
+//             amount,
+//           };
+//         })
+//       : [];
+
+//     const items = serviceItems.length > 0 ? serviceItems : legacyItems;
+
+//     // payments & refunds
+//     const paysSnap = await db.collection("payments").where("billId", "==", id).get();
+//     const payments = paysSnap.docs.map((d) => {
+//       const pd = d.data();
+//       return {
+//         id: d.id,
+//         paymentDateTime: pd.paymentDateTime || (pd.paymentDate ? `${pd.paymentDate}T${pd.paymentTime || "00:00"}:00.000Z` : null),
+//         paymentDate: pd.paymentDate || null,
+//         paymentTime: pd.paymentTime || null,
+//         amount: Number(pd.amount || 0),
+//         mode: pd.mode || "",
+//         referenceNo: pd.referenceNo || "",
+//         chequeDate: pd.chequeDate || null,
+//         chequeNumber: pd.chequeNumber || null,
+//         bankName: pd.bankName || null,
+//         transferType: pd.transferType || null,
+//         transferDate: pd.transferDate || null,
+//         upiName: pd.upiName || null,
+//         upiId: pd.upiId || null,
+//         upiDate: pd.upiDate || null,
+//         drawnOn: pd.drawnOn || null,
+//         drawnAs: pd.drawnAs || null,
+//         receiptNo: pd.receiptNo || d.id,
+//       };
+//     });
+
+//     const refundsSnap = await db.collection("refunds").where("billId", "==", id).get();
+//     const refunds = refundsSnap.docs.map((d) => ({ id: d.id, ...d.data() }));
+
+//     // sort payments chronologically
+//     payments.sort((a, b) => {
+//       const da = a.paymentDateTime ? new Date(a.paymentDateTime) : new Date(0);
+//       const dbb = b.paymentDateTime ? new Date(b.paymentDateTime) : new Date(0);
+//       return da - dbb;
+//     });
+
+//     // totals
+//     const total = Number(bill.total || items.reduce((s, it) => s + Number(it.amount || 0), 0));
+//     const totalPaidGross = payments.reduce((s, p) => s + Number(p.amount || 0), 0);
+//     const totalRefunded = refunds.reduce((s, r) => s + Number(r.amount || 0), 0);
+//     const netPaid = totalPaidGross - totalRefunded;
+//     const balance = total - netPaid;
+
+//     // Only allow full-payment PDF if balance is zero (or less)
+//     if (balance > 0) {
+//       return res.status(400).json({ error: "Bill not fully paid - full payment PDF is available only after full payment" });
+//     }
+
+//     // ---------- FETCH CLINIC PROFILE ----------
+//     const profile = await getClinicProfile({ force: true });
+//     const clinicName = profileValue(profile, "clinicName");
+//     const clinicAddress = profileValue(profile, "address");
+//     const clinicPAN = profileValue(profile, "pan");
+//     const clinicRegNo = profileValue(profile, "regNo");
+//     const doctor1Name = profileValue(profile, "doctor1Name");
+//     const doctor1RegNo = profileValue(profile, "doctor1RegNo");
+//     const doctor2Name = profileValue(profile, "doctor2Name");
+//     const doctor2RegNo = profileValue(profile, "doctor2RegNo");
+//     const patientRepresentative = profileValue(profile, "patientRepresentative");
+//     const clinicRepresentative = profileValue(profile, "clinicRepresentative");
+
+//     // --- PDF Setup ---
+//     res.setHeader("Content-Type", "application/pdf");
+//     res.setHeader("Content-Disposition", `inline; filename="full-payment-${id}.pdf"`);
+
+//     const doc = new PDFDocument({ size: "A4", margin: 36 });
+//     doc.pipe(res);
+
+//     // register local font if available (optional)
+//     try {
+//       const workSansPath = path.join(__dirname, "resources", "WorkSans-Regular.ttf");
+//       if (fs && fs.existsSync(workSansPath)) {
+//         doc.registerFont("WorkSans", workSansPath);
+//         doc.font("WorkSans");
+//       } else {
+//         doc.font("Helvetica");
+//       }
+//     } catch (e) {
+//       doc.font("Helvetica");
+//     }
+
+//     const pageWidth = doc.page.width;
+//     const usableWidth = pageWidth - 72;
+//     let y = 36;
+
+//     // Header logos (try-catch because resources may not exist)
+//     const logoLeftPath = path.join(__dirname, "resources", "logo-left.png");
+//     const logoRightPath = path.join(__dirname, "resources", "logo-right.png");
+//     try { if (fs.existsSync(logoLeftPath)) doc.image(logoLeftPath, 36, y, { width: 40, height: 40 }); } catch (e) {}
+//     try { if (fs.existsSync(logoRightPath)) doc.image(logoRightPath, pageWidth - 36 - 40, y, { width: 40, height: 40 }); } catch (e) {}
+
+//     // Clinic header (from profile)
+//     doc.fontSize(14).font("Helvetica-Bold").text(clinicName || "", 0, y + 6, { align: "center", width: pageWidth });
+//     doc.fontSize(9).font("Helvetica").text(clinicAddress || "", 0, y + 28, { align: "center", width: pageWidth });
+//     doc.text(`PAN : ${clinicPAN || ""}   |   Reg. No: ${clinicRegNo || ""}`, { align: "center", width: pageWidth });
+
+//     y += 56;
+//     doc.moveTo(36, y).lineTo(pageWidth - 36, y).stroke();
+//     y += 8;
+
+//     // Invoice Title
+//     doc.fontSize(10).font("Helvetica-Bold").rect(36, y, usableWidth, 18).stroke();
+//     doc.text("FULL PAYMENT RECEIPT", 36, y + 4, { width: usableWidth, align: "center" });
+//     y += 28;
+
+//     // Invoice details line (Invoice No + Date) - date only DD.MM.YYYY
+//     const invoiceNo = bill.invoiceNo || id;
+//     const dateText = formatDateOnly(bill.date || "");
+//     doc.fontSize(9).font("Helvetica");
+//     doc.text(`Invoice No.: ${invoiceNo}`, 36, y);
+//     doc.text(`Date: ${dateText}`, pageWidth / 2, y, { width: usableWidth / 2, align: "right" });
+//     y += 14;
+
+//     // Patient info (address & sex swapped)
+//     const patientName = bill.patientName || "";
+//     const sexText = bill.sex ? String(bill.sex) : "";
+//     const ageText = bill.age != null && bill.age !== "" ? `${bill.age} Years` : "";
+//     const addressText = bill.address || "";
+
+//     doc.font("Helvetica-Bold").text(`Patient Name: ${patientName}`, 36, y);
+//     doc.font("Helvetica").text(`Age: ${ageText}`, pageWidth / 2, y, { width: usableWidth / 2, align: "right" });
+//     y += 14;
+
+//     doc.font("Helvetica").text(`Address: ${addressText || "____________________"}`, 36, y, { width: usableWidth * 0.6 });
+//     doc.font("Helvetica").text(`Sex: ${sexText || "-"}`, pageWidth / 2, y, { width: usableWidth / 2, align: "right" });
+//     y += 20;
+
+//     // ---------- SERVICES / ITEMS TABLE (outer-border + vertical separators like image) ----------
+//     const tableLeft = 36;
+//     const colSrW = 24;
+//     const colQtyW = 48;
+//     const colRateW = 70;
+//     const colSubW = 80;
+//     const colServiceW = usableWidth - (colSrW + colQtyW + colRateW + colSubW);
+
+//     const colSrX = tableLeft;
+//     const colServiceX = colSrX + colSrW;
+//     const colQtyX = colServiceX + colServiceW;
+//     const colRateX = colQtyX + colQtyW;
+//     const colSubX = colRateX + colRateW;
+//     const tableRightX = tableLeft + usableWidth;
+
+//     const headerHeight = 16;
+//     const minRowH = 14;
+//     const minTableHeight = 260; // increase so description area becomes large like image
+//     const bottomSafety = 120;
+
+//     // helper to draw vertical separators across full table block
+//     function drawVerticalsForItemsBlock(yTop, height) {
+//       const xs = [colSrX, colServiceX, colQtyX, colRateX, colSubX, tableRightX];
+//       xs.forEach((x) => {
+//         doc.moveTo(x, yTop).lineTo(x, yTop + height).stroke();
+//       });
+//     }
+
+//     const tableStartY = y;
+
+//     // header background + border top
+//     doc.save().rect(tableLeft, y, usableWidth, headerHeight).fill("#F3F3F3").restore();
+//     // don't draw the outer border yet - we'll draw it after we've decided final height
+//     // render header texts
+//     doc.font("Helvetica-Bold").fontSize(9);
+//     doc.text("Sr.", colSrX + 4, y + 3);
+//     doc.text("Description of Items / Services", colServiceX + 4, y + 3, { width: colServiceW - 8 });
+//     doc.text("Qty", colQtyX + 4, y + 3);
+//     doc.text("Rate", colRateX + 4, y + 3, { width: colRateW - 8, align: "right" });
+//     doc.text("Amount", colSubX + 4, y + 3, { width: colSubW - 8, align: "right" });
+
+//     y += headerHeight;
+
+//     // single horizontal separator under header
+//     doc.moveTo(tableLeft, y).lineTo(tableRightX, y).stroke();
+
+//     // render items' content (only text, NO horizontal separators per row)
+//     doc.font("Helvetica").fontSize(9);
+//     let filledHeight = 0;
+//     const rowsMeta = []; // keep heights to possibly compute final block height
+//     for (let i = 0; i < items.length; i++) {
+//       const it = items[i];
+//       const descH = doc.heightOfString(it.description || "", { width: colServiceW - 8 });
+//       const qtyH = doc.heightOfString(String(it.qty || ""), { width: colQtyW - 8 });
+//       const rateH = doc.heightOfString(formatMoney(it.rate || 0), { width: colRateW - 8 });
+//       const amtH = doc.heightOfString(formatMoney(it.amount || 0), { width: colSubW - 8 });
+
+//       const contentMaxH = Math.max(descH, qtyH, rateH, amtH);
+//       const thisRowH = Math.max(minRowH, contentMaxH + 8);
+
+//       // page break if necessary BEFORE placing row
+//       if (y + thisRowH > doc.page.height - bottomSafety) {
+//         // finalize verticals for segment before page break
+//         const segmentHeight = filledHeight;
+//         if (segmentHeight > 0) {
+//           // draw verticals for previous page segment
+//           drawVerticalsForItemsBlock(tableStartY, segmentHeight);
+//           // draw outer border for that page's table area
+//           doc.rect(tableLeft, tableStartY, usableWidth, segmentHeight + headerHeight).stroke();
+//         }
+
+//         doc.addPage();
+//         y = 36;
+
+//         // redraw header area on new page
+//         try { if (fs.existsSync(logoLeftPath)) doc.image(logoLeftPath, 36, y, { width: 40, height: 40 }); } catch (e) {}
+//         try { if (fs.existsSync(logoRightPath)) doc.image(logoRightPath, pageWidth - 36 - 40, y, { width: 40, height: 40 }); } catch (e) {}
+//         doc.fontSize(14).font("Helvetica-Bold").text(clinicName || "", 0, y + 6, { align: "center", width: pageWidth });
+//         doc.fontSize(9).font("Helvetica").text(clinicAddress || "", 0, y + 28, { align: "center", width: pageWidth });
+//         y += 56;
+//         doc.moveTo(36, y).lineTo(pageWidth - 36, y).stroke();
+//         y += 8;
+
+//         doc.fontSize(10).font("Helvetica-Bold").rect(36, y, usableWidth, 18).stroke();
+//         doc.text("FULL PAYMENT RECEIPT", 36, y + 4, { width: usableWidth, align: "center" });
+//         y += 28;
+
+//         // re-render header for the table on new page
+//         const newTableStartY = y;
+//         // header background
+//         doc.save().rect(tableLeft, y, usableWidth, headerHeight).fill("#F3F3F3").restore();
+//         doc.font("Helvetica-Bold").fontSize(9);
+//         doc.text("Sr.", colSrX + 4, y + 3);
+//         doc.text("Description of Items / Services", colServiceX + 4, y + 3, { width: colServiceW - 8 });
+//         doc.text("Qty", colQtyX + 4, y + 3);
+//         doc.text("Rate", colRateX + 4, y + 3, { width: colRateW - 8, align: "right" });
+//         doc.text("Amount", colSubX + 4, y + 3, { width: colSubW - 8, align: "right" });
+//         y += headerHeight;
+//         doc.moveTo(tableLeft, y).lineTo(tableRightX, y).stroke();
+
+//         // reset tableStartY and filledHeight for new page
+//         filledHeight = 0;
+//         rowsMeta.length = 0;
+//         // update tableStartY for the new page (we will draw verticals after filling)
+//         tableStartY = y - headerHeight; // headerTopY for new page
+//       }
+
+//       // draw text into columns (centered vertically within row)
+//       const rowTop = y;
+//       const descH2 = doc.heightOfString(it.description || "", { width: colServiceW - 8 });
+//       const qtyH2 = doc.heightOfString(String(it.qty || ""), { width: colQtyW - 8 });
+//       const rateH2 = doc.heightOfString(formatMoney(it.rate || 0), { width: colRateW - 8 });
+//       const amtH2 = doc.heightOfString(formatMoney(it.amount || 0), { width: colSubW - 8 });
+//       const actualRowH = Math.max(minRowH, Math.max(descH2, qtyH2, rateH2, amtH2) + 8);
+
+//       const descY = rowTop + (actualRowH - descH2) / 2;
+//       const qtyY = rowTop + (actualRowH - qtyH2) / 2;
+//       const rateY = rowTop + (actualRowH - rateH2) / 2;
+//       const amtY = rowTop + (actualRowH - amtH2) / 2;
+
+//       doc.text(String(i + 1), colSrX + 4, rowTop + 4);
+//       doc.text(it.description || "", colServiceX + 4, descY, { width: colServiceW - 8 });
+//       doc.text(String(it.qty != null && it.qty !== "" ? it.qty : ""), colQtyX + 4, qtyY, { width: colQtyW - 8, align: "left" });
+//       doc.text(formatMoney(it.rate || 0), colRateX + 4, rateY, { width: colRateW - 8, align: "right" });
+//       doc.text(formatMoney(it.amount || 0), colSubX + 4, amtY, { width: colSubW - 8, align: "right" });
+
+//       y += actualRowH;
+//       filledHeight += actualRowH;
+//       rowsMeta.push({ top: rowTop, height: actualRowH });
+//     }
+
+//     // After items drawn on the current page: ensure table has at least minTableHeight visual area
+//     let totalTableHeight = filledHeight; // height for the content area (below header)
+//     if (totalTableHeight < minTableHeight) {
+//       const needed = minTableHeight - totalTableHeight;
+//       // add filler rows (visual empty space) - just advance y and increase filledHeight
+//       const fillerUnits = Math.ceil(needed / minRowH);
+//       for (let f = 0; f < fillerUnits; f++) {
+//         // page break safety while filling
+//         if (y + minRowH > doc.page.height - bottomSafety) {
+//           // finalize verticals and border for current page's table block
+//           drawVerticalsForItemsBlock(tableStartY, filledHeight + headerHeight);
+//           doc.rect(tableLeft, tableStartY, usableWidth, filledHeight + headerHeight).stroke();
+
+//           doc.addPage();
+//           y = 36;
+
+//           // redraw header area on new page and set new tableStartY
+//           try { if (fs.existsSync(logoLeftPath)) doc.image(logoLeftPath, 36, y, { width: 40, height: 40 }); } catch (e) {}
+//           try { if (fs.existsSync(logoRightPath)) doc.image(logoRightPath, pageWidth - 36 - 40, y, { width: 40, height: 40 }); } catch (e) {}
+//           doc.fontSize(14).font("Helvetica-Bold").text(clinicName || "", 0, y + 6, { align: "center", width: pageWidth });
+//           doc.fontSize(9).font("Helvetica").text(clinicAddress || "", 0, y + 28, { align: "center", width: pageWidth });
+//           y += 56;
+//           doc.moveTo(36, y).lineTo(pageWidth - 36, y).stroke();
+//           y += 8;
+
+//           doc.fontSize(10).font("Helvetica-Bold").rect(36, y, usableWidth, 18).stroke();
+//           doc.text("FULL PAYMENT RECEIPT", 36, y + 4, { width: usableWidth, align: "center" });
+//           y += 28;
+
+//           // render header again
+//           tableStartY = y;
+//           doc.save().rect(tableLeft, y, usableWidth, headerHeight).fill("#F3F3F3").restore();
+//           doc.font("Helvetica-Bold").fontSize(9);
+//           doc.text("Sr.", colSrX + 4, y + 3);
+//           doc.text("Description of Items / Services", colServiceX + 4, y + 3, { width: colServiceW - 8 });
+//           doc.text("Qty", colQtyX + 4, y + 3);
+//           doc.text("Rate", colRateX + 4, y + 3, { width: colRateW - 8, align: "right" });
+//           doc.text("Amount", colSubX + 4, y + 3, { width: colSubW - 8, align: "right" });
+//           y += headerHeight;
+//           doc.moveTo(tableLeft, y).lineTo(tableRightX, y).stroke();
+
+//           filledHeight = 0;
+//         }
+
+//         // add filler block
+//         y += minRowH;
+//         filledHeight += minRowH;
+//       }
+//       totalTableHeight = filledHeight;
+//     }
+
+//     // Now draw vertical separators spanning the full visual table block (header + content)
+//     const visualTableHeight = headerHeight + totalTableHeight;
+//     drawVerticalsForItemsBlock(tableStartY, visualTableHeight);
+
+//     // draw outer border around the whole table block (header + content)
+//     doc.rect(tableLeft, tableStartY, usableWidth, visualTableHeight).stroke();
+
+//     // Place totals box so that it visually attaches to bottom-right of the table block (like image)
+//     const boxWidth = 180;
+//     const boxHeight = 36; // two rows height visually
+//     // Make the top of the box align exactly with bottom edge of table (so box sits immediately under it)
+//     // to mimic the screenshot where totals box is attached to the table bottom-right, we set boxY just below table
+//     const boxX = tableRightX - boxWidth;
+//     const boxY = tableStartY + visualTableHeight - boxHeight / 2; // slight overlap for visual attachment
+
+//     // Ensure box fits on current page, otherwise add new page and recalc positions
+//     if (boxY + boxHeight + 60 > doc.page.height) {
+//       doc.addPage();
+//       // place box at top area on new page
+//       // redraw small header block for context
+//       try { if (fs.existsSync(logoLeftPath)) doc.image(logoLeftPath, 36, 36, { width: 40, height: 40 }); } catch (e) {}
+//       try { if (fs.existsSync(logoRightPath)) doc.image(logoRightPath, pageWidth - 36 - 40, 36, { width: 40, height: 40 }); } catch (e) {}
+//       doc.fontSize(14).font("Helvetica-Bold").text(clinicName || "", 0, 42, { align: "center", width: pageWidth });
+//       y = 100;
+//       // place box in new page's upper area
+//       doc.rect(36, y, boxWidth, boxHeight).stroke();
+//       doc.font("Helvetica-Bold").fontSize(9).text("Total Due", 36 + 6, y + 6);
+//       doc.font("Helvetica").fontSize(9).text(`Rs ${formatMoney(total)}`, 36, y + 6, { width: boxWidth - 8, align: "right" });
+//       y += boxHeight + 20;
+//     } else {
+//       // draw totals box attached to table bottom-right
+//       doc.rect(boxX, boxY, boxWidth, boxHeight).stroke();
+//       doc.font("Helvetica-Bold").fontSize(9).text("Total Due", boxX + 6, boxY + 6);
+//       doc.font("Helvetica").fontSize(9).text(`Rs ${formatMoney(total)}`, boxX, boxY + 6, { width: boxWidth - 8, align: "right" });
+//       // advance y below box for footer
+//       y = tableStartY + visualTableHeight + 20;
+//     }
+
+//     // FOOTER NOTE + SIGNATURE
+//     doc.fontSize(8).text("* This receipt is generated by the clinic. Disputes if any are subject to local jurisdiction.", 36, y, { width: usableWidth });
+//     const sigY = y + 28;
+//     const sigWidth = 160;
+//     doc.moveTo(36, sigY).lineTo(36 + sigWidth, sigY).dash(1, { space: 2 }).stroke().undash();
+//     doc.fontSize(8).text(patientRepresentative || "", 36, sigY + 4, { width: sigWidth, align: "center" });
+//     const rightSigX = pageWidth - 36 - sigWidth;
+//     doc.moveTo(rightSigX, sigY).lineTo(rightSigX + sigWidth, sigY).dash(1, { space: 2 }).stroke().undash();
+//     doc.fontSize(8).text(clinicRepresentative || "", rightSigX, sigY + 4, { width: sigWidth, align: "center" });
+
+//     doc.end();
+//   } catch (err) {
+//     console.error("full-payment-pdf error:", err);
+//     if (!res.headersSent) {
+//       res.status(500).json({ error: "Failed to generate full payment PDF" });
+//     } else {
+//       try { res.end(); } catch (e) {}
+//     }
+//   }
+// });
+
+
+// app.get("/api/bills/:id/full-payment-pdf", async (req, res) => {
+//   const id = req.params.id;
+//   if (!id) return res.status(400).json({ error: "Invalid bill id" });
+
+//   function formatMoney(v) { return Number(v || 0).toFixed(2); }
+
+//   function formatDateOnly(dtString) {
+//     return typeof formatDateDot === "function" ? formatDateDot(dtString) : dtString || "";
+//   }
+
+//   try {
+//     // load bill
+//     const billRef = db.collection("bills").doc(id);
+//     const billSnap = await billRef.get();
+//     if (!billSnap.exists) return res.status(404).json({ error: "Bill not found" });
+//     const bill = billSnap.data();
+
+//     // fetch items (legacy/new combined)
+//     const itemsSnap = await db.collection("items").where("billId", "==", id).get();
+//     const legacyItems = itemsSnap.docs.map((d) => {
+//       const dd = d.data();
+//       return {
+//         id: d.id,
+//         description: dd.description || dd.item || dd.details || "",
+//         qty: Number(dd.qty || 0),
+//         rate: Number(dd.rate || 0),
+//         amount: dd.amount != null ? Number(dd.amount) : Number(dd.qty || 0) * Number(dd.rate || 0),
+//       };
+//     });
+
+//     const serviceItems = Array.isArray(bill.services)
+//       ? bill.services.map((s, idx) => {
+//           const qty = Number(s.qty || 0);
+//           const rate = Number(s.rate || 0);
+//           const amount = s.amount != null ? Number(s.amount) : qty * rate;
+//           const parts = [];
+//           if (s.item) parts.push(s.item);
+//           if (s.details) parts.push(s.details);
+//           return {
+//             id: `svc-${idx + 1}`,
+//             description: parts.join(" - "),
+//             qty,
+//             rate,
+//             amount,
+//           };
+//         })
+//       : [];
+
+//     const items = serviceItems.length > 0 ? serviceItems : legacyItems;
+
+//     // payments & refunds
+//     const paysSnap = await db.collection("payments").where("billId", "==", id).get();
+//     const payments = paysSnap.docs.map((d) => {
+//       const pd = d.data();
+//       return {
+//         id: d.id,
+//         paymentDateTime: pd.paymentDateTime || (pd.paymentDate ? `${pd.paymentDate}T${pd.paymentTime || "00:00"}:00.000Z` : null),
+//         paymentDate: pd.paymentDate || null,
+//         paymentTime: pd.paymentTime || null,
+//         amount: Number(pd.amount || 0),
+//         mode: pd.mode || "",
+//         referenceNo: pd.referenceNo || "",
+//         chequeDate: pd.chequeDate || null,
+//         chequeNumber: pd.chequeNumber || null,
+//         bankName: pd.bankName || null,
+//         transferType: pd.transferType || null,
+//         transferDate: pd.transferDate || null,
+//         upiName: pd.upiName || null,
+//         upiId: pd.upiId || null,
+//         upiDate: pd.upiDate || null,
+//         drawnOn: pd.drawnOn || null,
+//         drawnAs: pd.drawnAs || null,
+//         receiptNo: pd.receiptNo || d.id,
+//       };
+//     });
+
+//     const refundsSnap = await db.collection("refunds").where("billId", "==", id).get();
+//     const refunds = refundsSnap.docs.map((d) => ({ id: d.id, ...d.data() }));
+
+//     // sort payments chronologically
+//     payments.sort((a, b) => {
+//       const da = a.paymentDateTime ? new Date(a.paymentDateTime) : new Date(0);
+//       const dbb = b.paymentDateTime ? new Date(b.paymentDateTime) : new Date(0);
+//       return da - dbb;
+//     });
+
+//     // totals
+//     const total = Number(bill.total || items.reduce((s, it) => s + Number(it.amount || 0), 0));
+//     const totalPaidGross = payments.reduce((s, p) => s + Number(p.amount || 0), 0);
+//     const totalRefunded = refunds.reduce((s, r) => s + Number(r.amount || 0), 0);
+//     const netPaid = totalPaidGross - totalRefunded;
+//     const balance = total - netPaid;
+
+//     // Only allow full-payment PDF if balance is zero (or less)
+//     if (balance > 0) {
+//       return res.status(400).json({ error: "Bill not fully paid - full payment PDF is available only after full payment" });
+//     }
+
+//     // ---------- FETCH CLINIC PROFILE ----------
+//     const profile = await getClinicProfile({ force: true });
+//     const clinicName = profileValue(profile, "clinicName");
+//     const clinicAddress = profileValue(profile, "address");
+//     const clinicPAN = profileValue(profile, "pan");
+//     const clinicRegNo = profileValue(profile, "regNo");
+//     const doctor1Name = profileValue(profile, "doctor1Name");
+//     const doctor1RegNo = profileValue(profile, "doctor1RegNo");
+//     const doctor2Name = profileValue(profile, "doctor2Name");
+//     const doctor2RegNo = profileValue(profile, "doctor2RegNo");
+//     const patientRepresentative = profileValue(profile, "patientRepresentative");
+//     const clinicRepresentative = profileValue(profile, "clinicRepresentative");
+
+//     // --- PDF Setup ---
+//     res.setHeader("Content-Type", "application/pdf");
+//     res.setHeader("Content-Disposition", `inline; filename="full-payment-${id}.pdf"`);
+
+//     const doc = new PDFDocument({ size: "A4", margin: 36 });
+//     doc.pipe(res);
+
+//     // register local font if available (optional)
+//     try {
+//       const workSansPath = path.join(__dirname, "resources", "WorkSans-Regular.ttf");
+//       if (fs && fs.existsSync(workSansPath)) {
+//         doc.registerFont("WorkSans", workSansPath);
+//         doc.font("WorkSans");
+//       } else {
+//         doc.font("Helvetica");
+//       }
+//     } catch (e) {
+//       doc.font("Helvetica");
+//     }
+
+//     const pageWidth = doc.page.width;
+//     const usableWidth = pageWidth - 72;
+//     let y = 36;
+
+//     // Header logos (try-catch because resources may not exist)
+//     const logoLeftPath = path.join(__dirname, "resources", "logo-left.png");
+//     const logoRightPath = path.join(__dirname, "resources", "logo-right.png");
+//     try { if (fs.existsSync(logoLeftPath)) doc.image(logoLeftPath, 36, y, { width: 40, height: 40 }); } catch (e) {}
+//     try { if (fs.existsSync(logoRightPath)) doc.image(logoRightPath, pageWidth - 36 - 40, y, { width: 40, height: 40 }); } catch (e) {}
+
+//     // Clinic header (from profile)
+//     doc.fontSize(14).font("Helvetica-Bold").text(clinicName || "", 0, y + 6, { align: "center", width: pageWidth });
+//     doc.fontSize(9).font("Helvetica").text(clinicAddress || "", 0, y + 28, { align: "center", width: pageWidth });
+//     doc.text(`PAN : ${clinicPAN || ""}   |   Reg. No: ${clinicRegNo || ""}`, { align: "center", width: pageWidth });
+
+//     y += 56;
+//     doc.moveTo(36, y).lineTo(pageWidth - 36, y).stroke();
+//     y += 8;
+
+//     // Invoice Title
+//     doc.fontSize(10).font("Helvetica-Bold").rect(36, y, usableWidth, 18).stroke();
+//     doc.text("FULL PAYMENT RECEIPT", 36, y + 4, { width: usableWidth, align: "center" });
+//     y += 28;
+
+//     // Invoice details line (Invoice No + Date) - date only DD.MM.YYYY
+//     const invoiceNo = bill.invoiceNo || id;
+//     const dateText = formatDateOnly(bill.date || "");
+//     doc.fontSize(9).font("Helvetica");
+//     doc.text(`Invoice No.: ${invoiceNo}`, 36, y);
+//     doc.text(`Date: ${dateText}`, pageWidth / 2, y, { width: usableWidth / 2, align: "right" });
+//     y += 14;
+
+//     // Patient info (address & sex swapped)
+//     const patientName = bill.patientName || "";
+//     const sexText = bill.sex ? String(bill.sex) : "";
+//     const ageText = bill.age != null && bill.age !== "" ? `${bill.age} Years` : "";
+//     const addressText = bill.address || "";
+
+//     doc.font("Helvetica-Bold").text(`Patient Name: ${patientName}`, 36, y);
+//     doc.font("Helvetica").text(`Age: ${ageText}`, pageWidth / 2, y, { width: usableWidth / 2, align: "right" });
+//     y += 14;
+
+//     doc.font("Helvetica").text(`Address: ${addressText || "____________________"}`, 36, y, { width: usableWidth * 0.6 });
+//     doc.font("Helvetica").text(`Sex: ${sexText || "-"}`, pageWidth / 2, y, { width: usableWidth / 2, align: "right" });
+//     y += 20;
+
+//     // ---------- SERVICES / ITEMS TABLE (outer-border + vertical separators like image) ----------
+//     const tableLeft = 36;
+//     const colSrW = 24;
+//     const colQtyW = 48;
+//     const colRateW = 70;
+//     const colSubW = 80;
+//     const colServiceW = usableWidth - (colSrW + colQtyW + colRateW + colSubW);
+
+//     const colSrX = tableLeft;
+//     const colServiceX = colSrX + colSrW;
+//     const colQtyX = colServiceX + colServiceW;
+//     const colRateX = colQtyX + colQtyW;
+//     const colSubX = colRateX + colRateW;
+//     const tableRightX = tableLeft + usableWidth;
+
+//     const headerHeight = 16;
+//     const minRowH = 14;
+//     const minTableHeight = 260; // adjust for large description area
+//     const bottomSafety = 120;
+
+//     // helper to draw vertical separators across full table block
+//     function drawVerticalsForItemsBlock(yTop, height) {
+//       const xs = [colSrX, colServiceX, colQtyX, colRateX, colSubX, tableRightX];
+//       xs.forEach((x) => {
+//         doc.moveTo(x, yTop).lineTo(x, yTop + height).stroke();
+//       });
+//     }
+
+//     // We'll set tableStartY to header top
+//     let tableStartY = y;
+
+//     // header background + text (don't draw outer border yet until we know final height)
+//     doc.save().rect(tableLeft, y, usableWidth, headerHeight).fill("#F3F3F3").restore();
+//     doc.font("Helvetica-Bold").fontSize(9);
+//     doc.text("Sr.", colSrX + 4, y + 3);
+//     doc.text("Description of Items / Services", colServiceX + 4, y + 3, { width: colServiceW - 8 });
+//     doc.text("Qty", colQtyX + 4, y + 3);
+//     doc.text("Rate", colRateX + 4, y + 3, { width: colRateW - 8, align: "right" });
+//     doc.text("Amount", colSubX + 4, y + 3, { width: colSubW - 8, align: "right" });
+
+//     y += headerHeight;
+
+//     // single horizontal separator under header
+//     doc.moveTo(tableLeft, y).lineTo(tableRightX, y).stroke();
+
+//     // render items (text only — no horizontal lines between rows; we'll draw verticals later spanning whole block)
+//     doc.font("Helvetica").fontSize(9);
+//     let filledHeight = 0;
+//     for (let i = 0; i < items.length; i++) {
+//       const it = items[i];
+
+//       const descH = doc.heightOfString(it.description || "", { width: colServiceW - 8 });
+//       const qtyH = doc.heightOfString(String(it.qty || ""), { width: colQtyW - 8 });
+//       const rateH = doc.heightOfString(formatMoney(it.rate || 0), { width: colRateW - 8 });
+//       const amtH = doc.heightOfString(formatMoney(it.amount || 0), { width: colSubW - 8 });
+
+//       const contentMaxH = Math.max(descH, qtyH, rateH, amtH);
+//       const thisRowH = Math.max(minRowH, contentMaxH + 8);
+
+//       // page-break check before placing row
+//       if (y + thisRowH > doc.page.height - bottomSafety) {
+//         // finalize verticals + border for the block drawn so far on this page
+//         const visualHeightSoFar = headerHeight + filledHeight;
+//         if (visualHeightSoFar > 0) {
+//           drawVerticalsForItemsBlock(tableStartY, visualHeightSoFar);
+//           doc.rect(tableLeft, tableStartY, usableWidth, visualHeightSoFar).stroke();
+//         }
+
+//         doc.addPage();
+//         y = 36;
+
+//         // redraw header area for new page
+//         try { if (fs.existsSync(logoLeftPath)) doc.image(logoLeftPath, 36, y, { width: 40, height: 40 }); } catch (e) {}
+//         try { if (fs.existsSync(logoRightPath)) doc.image(logoRightPath, pageWidth - 36 - 40, y, { width: 40, height: 40 }); } catch (e) {}
+//         doc.fontSize(14).font("Helvetica-Bold").text(clinicName || "", 0, y + 6, { align: "center", width: pageWidth });
+//         doc.fontSize(9).font("Helvetica").text(clinicAddress || "", 0, y + 28, { align: "center", width: pageWidth });
+//         y += 56;
+//         doc.moveTo(36, y).lineTo(pageWidth - 36, y).stroke();
+//         y += 8;
+
+//         doc.fontSize(10).font("Helvetica-Bold").rect(36, y, usableWidth, 18).stroke();
+//         doc.text("FULL PAYMENT RECEIPT", 36, y + 4, { width: usableWidth, align: "center" });
+//         y += 28;
+
+//         // render table header on new page and reset trackers
+//         tableStartY = y;
+//         doc.save().rect(tableLeft, y, usableWidth, headerHeight).fill("#F3F3F3").restore();
+//         doc.font("Helvetica-Bold").fontSize(9);
+//         doc.text("Sr.", colSrX + 4, y + 3);
+//         doc.text("Description of Items / Services", colServiceX + 4, y + 3, { width: colServiceW - 8 });
+//         doc.text("Qty", colQtyX + 4, y + 3);
+//         doc.text("Rate", colRateX + 4, y + 3, { width: colRateW - 8, align: "right" });
+//         doc.text("Amount", colSubX + 4, y + 3, { width: colSubW - 8, align: "right" });
+//         y += headerHeight;
+//         doc.moveTo(tableLeft, y).lineTo(tableRightX, y).stroke();
+
+//         filledHeight = 0;
+//       }
+
+//       // draw row text (centered vertically within row)
+//       const descH2 = doc.heightOfString(it.description || "", { width: colServiceW - 8 });
+//       const qtyH2 = doc.heightOfString(String(it.qty || ""), { width: colQtyW - 8 });
+//       const rateH2 = doc.heightOfString(formatMoney(it.rate || 0), { width: colRateW - 8 });
+//       const amtH2 = doc.heightOfString(formatMoney(it.amount || 0), { width: colSubW - 8 });
+//       const actualRowH = Math.max(minRowH, Math.max(descH2, qtyH2, rateH2, amtH2) + 8);
+
+//       const rowTop = y;
+//       const descY = rowTop + (actualRowH - descH2) / 2;
+//       const qtyY = rowTop + (actualRowH - qtyH2) / 2;
+//       const rateY = rowTop + (actualRowH - rateH2) / 2;
+//       const amtY = rowTop + (actualRowH - amtH2) / 2;
+
+//       doc.text(String(i + 1), colSrX + 4, rowTop + 4);
+//       doc.text(it.description || "", colServiceX + 4, descY, { width: colServiceW - 8 });
+//       doc.text(String(it.qty != null && it.qty !== "" ? it.qty : ""), colQtyX + 4, qtyY, { width: colQtyW - 8, align: "left" });
+//       doc.text(formatMoney(it.rate || 0), colRateX + 4, rateY, { width: colRateW - 8, align: "right" });
+//       doc.text(formatMoney(it.amount || 0), colSubX + 4, amtY, { width: colSubW - 8, align: "right" });
+
+//       y += actualRowH;
+//       filledHeight += actualRowH;
+//     }
+
+//     // ensure minimum visual height of the items block (adds filler rows if necessary)
+//     let totalTableHeight = filledHeight;
+//     if (totalTableHeight < minTableHeight) {
+//       let needed = minTableHeight - totalTableHeight;
+//       const fillerRows = Math.ceil(needed / minRowH);
+//       for (let fr = 0; fr < fillerRows; fr++) {
+//         if (y + minRowH > doc.page.height - bottomSafety) {
+//           // finalize previous page table visuals
+//           drawVerticalsForItemsBlock(tableStartY, headerHeight + totalTableHeight);
+//           doc.rect(tableLeft, tableStartY, usableWidth, headerHeight + totalTableHeight).stroke();
+
+//           doc.addPage();
+//           y = 36;
+
+//           // header context on new page
+//           try { if (fs.existsSync(logoLeftPath)) doc.image(logoLeftPath, 36, y, { width: 40, height: 40 }); } catch (e) {}
+//           try { if (fs.existsSync(logoRightPath)) doc.image(logoRightPath, pageWidth - 36 - 40, y, { width: 40, height: 40 }); } catch (e) {}
+//           doc.fontSize(14).font("Helvetica-Bold").text(clinicName || "", 0, y + 6, { align: "center", width: pageWidth });
+//           doc.fontSize(9).font("Helvetica").text(clinicAddress || "", 0, y + 28, { align: "center", width: pageWidth });
+//           y += 56;
+//           doc.moveTo(36, y).lineTo(pageWidth - 36, y).stroke();
+//           y += 8;
+
+//           doc.fontSize(10).font("Helvetica-Bold").rect(36, y, usableWidth, 18).stroke();
+//           doc.text("FULL PAYMENT RECEIPT", 36, y + 4, { width: usableWidth, align: "center" });
+//           y += 28;
+
+//           // render header again, reset trackers
+//           tableStartY = y;
+//           doc.save().rect(tableLeft, y, usableWidth, headerHeight).fill("#F3F3F3").restore();
+//           doc.font("Helvetica-Bold").fontSize(9);
+//           doc.text("Sr.", colSrX + 4, y + 3);
+//           doc.text("Description of Items / Services", colServiceX + 4, y + 3, { width: colServiceW - 8 });
+//           doc.text("Qty", colQtyX + 4, y + 3);
+//           doc.text("Rate", colRateX + 4, y + 3, { width: colRateW - 8, align: "right" });
+//           doc.text("Amount", colSubX + 4, y + 3, { width: colSubW - 8, align: "right" });
+//           y += headerHeight;
+//           doc.moveTo(tableLeft, y).lineTo(tableRightX, y).stroke();
+
+//           totalTableHeight = 0;
+//         }
+
+//         // filler row
+//         y += minRowH;
+//         totalTableHeight += minRowH;
+//       }
+//       filledHeight = totalTableHeight;
+//     }
+
+//     // draw vertical separators spanning header + content
+//     const visualTableHeight = headerHeight + filledHeight;
+//     drawVerticalsForItemsBlock(tableStartY, visualTableHeight);
+
+//     // draw outer border around the table block (header + content)
+//     doc.rect(tableLeft, tableStartY, usableWidth, visualTableHeight).stroke();
+
+//     // ===== Place Total Due box IMMEDIATELY AFTER TABLE (no gap) =====
+//     const boxWidth = 180;
+//     const boxHeight = 36; // height of totals box
+//     const boxX = tableRightX - boxWidth;
+//     // place top of box exactly at bottom edge of table (no gap)
+//     let boxY = tableStartY + visualTableHeight;
+
+//     // If the box doesn't fit on the current page, add a new page and place it near top (we keep payment details intact)
+//     if (boxY + boxHeight + 60 > doc.page.height) {
+//       doc.addPage();
+//       // redraw small header area for context
+//       try { if (fs.existsSync(logoLeftPath)) doc.image(logoLeftPath, 36, 36, { width: 40, height: 40 }); } catch (e) {}
+//       try { if (fs.existsSync(logoRightPath)) doc.image(logoRightPath, pageWidth - 36 - 40, 36, { width: 40, height: 40 }); } catch (e) {}
+//       doc.fontSize(14).font("Helvetica-Bold").text(clinicName || "", 0, 42, { align: "center", width: pageWidth });
+//       // place the box near top of new page (just below header area)
+//       boxY = 90;
+//     }
+
+//     // draw the totals box attached to table bottom (or on new page if overflow)
+//     doc.rect(boxX, boxY, boxWidth, boxHeight).stroke();
+//     doc.font("Helvetica-Bold").fontSize(9).text("Total Due", boxX + 6, boxY + 6);
+//     doc.font("Helvetica").fontSize(9).text(`Rs ${formatMoney(total)}`, boxX, boxY + 6, { width: boxWidth - 8, align: "right" });
+
+//     // set y to continue AFTER the box (if box was on same page below table, this keeps payment details after box)
+//     if (boxY === tableStartY + visualTableHeight) {
+//       // box placed immediately after table on same page
+//       y = boxY + boxHeight + 8;
+//     } else {
+//       // box placed on new page near top, set y accordingly to place payment details below
+//       y = boxY + boxHeight + 12;
+//     }
+
+//     // ---------- PAYMENT DETAILS (chronological) (kept as-is, appears after totals box) ----------
+//     const pTableLeft = 36;
+//     const pColDateW = 100; // date/time area
+//     const pColRecW = 140;
+//     const pColModeW = 90;
+//     const pColBankW = 110;
+//     const pColRefW = 110;
+//     const pColAmtW = usableWidth - (pColDateW + pColRecW + pColModeW + pColBankW + pColRefW);
+
+//     const pColDateX = pTableLeft;
+//     const pColRecX = pColDateX + pColDateW;
+//     const pColModeX = pColRecX + pColRecW;
+//     const pColBankX = pColModeX + pColModeW;
+//     const pColRefX = pColBankX + pColBankW;
+//     const pColAmtX = pColRefX + pColRefW;
+//     const pTableRightX = pTableLeft + usableWidth;
+
+//     const pHeaderH = 18;
+//     const pMinRowH = 16;
+//     const pSegmentBottomSafety = 120;
+
+//     function drawVerticalsForSegmentPayments(yTop, height) {
+//       const xs = [pColDateX, pColRecX, pColModeX, pColBankX, pColRefX, pColAmtX, pTableRightX];
+//       const top = yTop;
+//       const bottom = yTop + height;
+//       xs.forEach((x) => {
+//         doc.moveTo(x, top).lineTo(x, bottom).stroke();
+//       });
+//     }
+
+//     // payments header
+//     const paymentsTableStartY = y;
+//     doc.save().rect(pTableLeft, y, usableWidth, pHeaderH).fill("#F3F3F3").restore().rect(pTableLeft, y, usableWidth, pHeaderH).stroke();
+//     drawVerticalsForSegmentPayments(y, pHeaderH);
+
+//     doc.font("Helvetica-Bold").fontSize(9);
+//     doc.text("Date", pColDateX + 4, y + 4, { width: pColDateW - 8 });
+//     doc.text("Receipt No.", pColRecX + 4, y + 4, { width: pColRecW - 8 });
+//     doc.text("Mode", pColModeX + 4, y + 4, { width: pColModeW - 8 });
+//     doc.text("Bank Name", pColBankX + 4, y + 4, { width: pColBankW - 8 });
+//     doc.text("Reference", pColRefX + 4, y + 4, { width: pColRefW - 8 });
+//     doc.text("Amount", pColAmtX + 4, y + 4, { width: pColAmtW - 8, align: "right" });
+
+//     y += pHeaderH;
+//     doc.moveTo(pTableLeft, y).lineTo(pTableRightX, y).stroke();
+
+//     // accumulate vertical segment per page for payments
+//     let pSegmentStartY = y;
+//     let pSegmentHeight = 0;
+
+//     doc.font("Helvetica").fontSize(9);
+
+//     for (const p of payments) {
+//       const dateTextP = formatDateOnly(p.paymentDateTime || p.paymentDate || `${p.paymentDate || ""}`);
+//       const receiptText = p.receiptNo || p.id || "";
+//       let modeText = p.mode || "-";
+//       if ((modeText === "BankTransfer" || (modeText && modeText.toLowerCase().includes("bank"))) && p.transferType) {
+//         modeText = `Bank (${p.transferType})`;
+//       }
+//       const bankText = p.bankName || "-";
+//       const refText = p.referenceNo || "-";
+//       const amtText = formatMoney(p.amount || 0);
+
+//       // compute heights
+//       const dH = doc.heightOfString(dateTextP, { width: pColDateW - 8 });
+//       const rH = doc.heightOfString(receiptText, { width: pColRecW - 8 });
+//       const mH = doc.heightOfString(modeText, { width: pColModeW - 8 });
+//       const bH = doc.heightOfString(bankText, { width: pColBankW - 8 });
+//       const refH = doc.heightOfString(refText, { width: pColRefW - 8 });
+//       const aH = doc.heightOfString(amtText, { width: pColAmtW - 8 });
+
+//       const maxH = Math.max(dH, rH, mH, bH, refH, aH);
+//       const rowH = Math.max(pMinRowH, maxH + 8);
+
+//       // page break check
+//       if (y + rowH > doc.page.height - pSegmentBottomSafety) {
+//         if (pSegmentHeight > 0) {
+//           drawVerticalsForSegmentPayments(pSegmentStartY, pSegmentHeight);
+//         }
+//         doc.addPage();
+//         y = 36;
+
+//         // redraw header area and payments header
+//         try { if (fs.existsSync(logoLeftPath)) doc.image(logoLeftPath, 36, y, { width: 40, height: 40 }); } catch (e) {}
+//         try { if (fs.existsSync(logoRightPath)) doc.image(logoRightPath, pageWidth - 36 - 40, y, { width: 40, height: 40 }); } catch (e) {}
+//         doc.font("Helvetica-Bold").fontSize(14).text(clinicName, 0, y + 6, { align: "center", width: pageWidth });
+//         doc.font("Helvetica").fontSize(9).text(clinicAddress, 0, y + 28, { align: "center", width: pageWidth });
+//         y += 56;
+//         doc.moveTo(36, y).lineTo(pageWidth - 36, y).stroke();
+//         y += 8;
+
+//         // redraw payments header on new page
+//         const headerTopY2 = y;
+//         doc.save().rect(pTableLeft, headerTopY2, usableWidth, pHeaderH).fill("#F3F3F3").restore().rect(pTableLeft, headerTopY2, usableWidth, pHeaderH).stroke();
+//         drawVerticalsForSegmentPayments(headerTopY2, pHeaderH);
+//         doc.font("Helvetica-Bold").fontSize(9);
+//         doc.text("Date", pColDateX + 4, headerTopY2 + 4, { width: pColDateW - 8 });
+//         doc.text("Receipt No.", pColRecX + 4, headerTopY2 + 4, { width: pColRecW - 8 });
+//         doc.text("Mode", pColModeX + 4, headerTopY2 + 4, { width: pColModeW - 8 });
+//         doc.text("Bank Name", pColBankX + 4, headerTopY2 + 4, { width: pColBankW - 8 });
+//         doc.text("Reference", pColRefX + 4, headerTopY2 + 4, { width: pColRefW - 8 });
+//         doc.text("Amount", pColAmtX + 4, headerTopY2 + 4, { width: pColAmtW - 8, align: "right" });
+//         y += pHeaderH;
+//         doc.moveTo(pTableLeft, y).lineTo(pTableRightX, y).stroke();
+
+//         // reset tracking
+//         pSegmentStartY = y;
+//         pSegmentHeight = 0;
+//         doc.font("Helvetica").fontSize(9);
+//       }
+
+//       // draw payment row box
+//       doc.rect(pTableLeft, y, usableWidth, rowH).stroke();
+
+//       const dateY = y + (rowH - dH) / 2;
+//       const recY = y + (rowH - rH) / 2;
+//       const modeY = y + (rowH - mH) / 2;
+//       const bankY = y + (rowH - bH) / 2;
+//       const refY = y + (rowH - refH) / 2;
+//       const amtY = y + (rowH - aH) / 2;
+
+//       doc.text(dateTextP, pColDateX + 4, dateY, { width: pColDateW - 8 });
+//       doc.text(receiptText, pColRecX + 4, recY, { width: pColRecW - 8 });
+//       doc.text(modeText, pColModeX + 4, modeY, { width: pColModeW - 8 });
+//       doc.text(bankText, pColBankX + 4, bankY, { width: pColBankW - 8 });
+//       doc.text(refText, pColRefX + 4, refY, { width: pColRefW - 8 });
+//       doc.text(amtText, pColAmtX + 4, amtY, { width: pColAmtW - 8, align: "right" });
+
+//       y += rowH;
+//       pSegmentHeight += rowH;
+//     }
+
+//     // draw verticals for last payment segment
+//     if (pSegmentHeight > 0) {
+//       drawVerticalsForSegmentPayments(pSegmentStartY, pSegmentHeight);
+//     }
+
+//     y += 12;
+
+//     // ---------- FOOTER TOTALS BOX (kept if you want duplicate summary) ----------
+//     // (Optional) You can keep or remove — I will keep small totals box at left as in previous layout
+//     const boxWidth2 = 260;
+//     const boxX2 = 36;
+//     const boxY2 = y;
+//     const lineH = 14;
+//     const rowsCount = 5;
+//     const boxHeight2 = rowsCount * lineH + 8;
+
+//     // If not enough space, add new page
+//     if (boxY2 + boxHeight2 + 60 > doc.page.height) {
+//       doc.addPage();
+//       y = 36;
+//     }
+
+//     doc.rect(boxX2, boxY2, boxWidth2, boxHeight2).stroke();
+//     let by = boxY2 + 6;
+//     doc.font("Helvetica").fontSize(9);
+
+//     const addRow = (label, value) => {
+//       doc.text(label, boxX2 + 6, by);
+//       doc.text(value, boxX2 + 6, by, { width: boxWidth2 - 12, align: "right" });
+//       by += lineH;
+//     };
+
+//     addRow("Total", `Rs ${formatMoney(total)}`);
+//     addRow("Total Paid (gross)", `Rs ${formatMoney(totalPaidGross)}`);
+//     addRow("Net Paid (after refunds)", `Rs ${formatMoney(netPaid)}`);
+//     addRow("Total Refunded", `Rs ${formatMoney(totalRefunded)}`);
+//     addRow("Balance", `Rs ${formatMoney(balance)}`);
+
+//     y = boxY2 + boxHeight2 + 20;
+
+//     // footer note + signatures (same as invoice)
+//     doc.fontSize(8).text("* This receipt is generated by the clinic. Disputes if any are subject to local jurisdiction.", 36, y, { width: usableWidth });
+//     const sigY = y + 28;
+//     const sigWidth = 160;
+//     doc.moveTo(36, sigY).lineTo(36 + sigWidth, sigY).dash(1, { space: 2 }).stroke().undash();
+//     doc.fontSize(8).text(patientRepresentative || "", 36, sigY + 4, { width: sigWidth, align: "center" });
+//     const rightSigX = pageWidth - 36 - sigWidth;
+//     doc.moveTo(rightSigX, sigY).lineTo(rightSigX + sigWidth, sigY).dash(1, { space: 2 }).stroke().undash();
+//     doc.fontSize(8).text(clinicRepresentative || "", rightSigX, sigY + 4, { width: sigWidth, align: "center" });
+
+//     doc.end();
+//   } catch (err) {
+//     console.error("full-payment-pdf error:", err);
+//     if (!res.headersSent) {
+//       res.status(500).json({ error: "Failed to generate full payment PDF" });
+//     } else {
+//       try { res.end(); } catch (e) {}
+//     }
+//   }
+// });
+
 app.get("/api/bills/:id/full-payment-pdf", async (req, res) => {
   const id = req.params.id;
   if (!id) return res.status(400).json({ error: "Invalid bill id" });
@@ -12372,7 +13371,7 @@ app.get("/api/bills/:id/full-payment-pdf", async (req, res) => {
 
     const headerHeight = 16;
     const minRowH = 14;
-    const minTableHeight = 260; // increase so description area becomes large like image
+    const minTableHeight = 260; // adjust for large description area
     const bottomSafety = 120;
 
     // helper to draw vertical separators across full table block
@@ -12383,12 +13382,11 @@ app.get("/api/bills/:id/full-payment-pdf", async (req, res) => {
       });
     }
 
-    const tableStartY = y;
+    // We'll set tableStartY to header top
+    let tableStartY = y;
 
-    // header background + border top
+    // header background + text (don't draw outer border yet until we know final height)
     doc.save().rect(tableLeft, y, usableWidth, headerHeight).fill("#F3F3F3").restore();
-    // don't draw the outer border yet - we'll draw it after we've decided final height
-    // render header texts
     doc.font("Helvetica-Bold").fontSize(9);
     doc.text("Sr.", colSrX + 4, y + 3);
     doc.text("Description of Items / Services", colServiceX + 4, y + 3, { width: colServiceW - 8 });
@@ -12401,12 +13399,12 @@ app.get("/api/bills/:id/full-payment-pdf", async (req, res) => {
     // single horizontal separator under header
     doc.moveTo(tableLeft, y).lineTo(tableRightX, y).stroke();
 
-    // render items' content (only text, NO horizontal separators per row)
+    // render items (text only — no horizontal lines between rows; we'll draw verticals later spanning whole block)
     doc.font("Helvetica").fontSize(9);
     let filledHeight = 0;
-    const rowsMeta = []; // keep heights to possibly compute final block height
     for (let i = 0; i < items.length; i++) {
       const it = items[i];
+
       const descH = doc.heightOfString(it.description || "", { width: colServiceW - 8 });
       const qtyH = doc.heightOfString(String(it.qty || ""), { width: colQtyW - 8 });
       const rateH = doc.heightOfString(formatMoney(it.rate || 0), { width: colRateW - 8 });
@@ -12415,21 +13413,19 @@ app.get("/api/bills/:id/full-payment-pdf", async (req, res) => {
       const contentMaxH = Math.max(descH, qtyH, rateH, amtH);
       const thisRowH = Math.max(minRowH, contentMaxH + 8);
 
-      // page break if necessary BEFORE placing row
+      // page-break check before placing row
       if (y + thisRowH > doc.page.height - bottomSafety) {
-        // finalize verticals for segment before page break
-        const segmentHeight = filledHeight;
-        if (segmentHeight > 0) {
-          // draw verticals for previous page segment
-          drawVerticalsForItemsBlock(tableStartY, segmentHeight);
-          // draw outer border for that page's table area
-          doc.rect(tableLeft, tableStartY, usableWidth, segmentHeight + headerHeight).stroke();
+        // finalize verticals + border for the block drawn so far on this page
+        const visualHeightSoFar = headerHeight + filledHeight;
+        if (visualHeightSoFar > 0) {
+          drawVerticalsForItemsBlock(tableStartY, visualHeightSoFar);
+          doc.rect(tableLeft, tableStartY, usableWidth, visualHeightSoFar).stroke();
         }
 
         doc.addPage();
         y = 36;
 
-        // redraw header area on new page
+        // redraw header area for new page
         try { if (fs.existsSync(logoLeftPath)) doc.image(logoLeftPath, 36, y, { width: 40, height: 40 }); } catch (e) {}
         try { if (fs.existsSync(logoRightPath)) doc.image(logoRightPath, pageWidth - 36 - 40, y, { width: 40, height: 40 }); } catch (e) {}
         doc.fontSize(14).font("Helvetica-Bold").text(clinicName || "", 0, y + 6, { align: "center", width: pageWidth });
@@ -12442,9 +13438,8 @@ app.get("/api/bills/:id/full-payment-pdf", async (req, res) => {
         doc.text("FULL PAYMENT RECEIPT", 36, y + 4, { width: usableWidth, align: "center" });
         y += 28;
 
-        // re-render header for the table on new page
-        const newTableStartY = y;
-        // header background
+        // render table header on new page and reset trackers
+        tableStartY = y;
         doc.save().rect(tableLeft, y, usableWidth, headerHeight).fill("#F3F3F3").restore();
         doc.font("Helvetica-Bold").fontSize(9);
         doc.text("Sr.", colSrX + 4, y + 3);
@@ -12455,21 +13450,17 @@ app.get("/api/bills/:id/full-payment-pdf", async (req, res) => {
         y += headerHeight;
         doc.moveTo(tableLeft, y).lineTo(tableRightX, y).stroke();
 
-        // reset tableStartY and filledHeight for new page
         filledHeight = 0;
-        rowsMeta.length = 0;
-        // update tableStartY for the new page (we will draw verticals after filling)
-        tableStartY = y - headerHeight; // headerTopY for new page
       }
 
-      // draw text into columns (centered vertically within row)
-      const rowTop = y;
+      // draw row text (centered vertically within row)
       const descH2 = doc.heightOfString(it.description || "", { width: colServiceW - 8 });
       const qtyH2 = doc.heightOfString(String(it.qty || ""), { width: colQtyW - 8 });
       const rateH2 = doc.heightOfString(formatMoney(it.rate || 0), { width: colRateW - 8 });
       const amtH2 = doc.heightOfString(formatMoney(it.amount || 0), { width: colSubW - 8 });
       const actualRowH = Math.max(minRowH, Math.max(descH2, qtyH2, rateH2, amtH2) + 8);
 
+      const rowTop = y;
       const descY = rowTop + (actualRowH - descH2) / 2;
       const qtyY = rowTop + (actualRowH - qtyH2) / 2;
       const rateY = rowTop + (actualRowH - rateH2) / 2;
@@ -12483,26 +13474,23 @@ app.get("/api/bills/:id/full-payment-pdf", async (req, res) => {
 
       y += actualRowH;
       filledHeight += actualRowH;
-      rowsMeta.push({ top: rowTop, height: actualRowH });
     }
 
-    // After items drawn on the current page: ensure table has at least minTableHeight visual area
-    let totalTableHeight = filledHeight; // height for the content area (below header)
+    // ensure minimum visual height of the items block (adds filler rows if necessary)
+    let totalTableHeight = filledHeight;
     if (totalTableHeight < minTableHeight) {
-      const needed = minTableHeight - totalTableHeight;
-      // add filler rows (visual empty space) - just advance y and increase filledHeight
-      const fillerUnits = Math.ceil(needed / minRowH);
-      for (let f = 0; f < fillerUnits; f++) {
-        // page break safety while filling
+      let needed = minTableHeight - totalTableHeight;
+      const fillerRows = Math.ceil(needed / minRowH);
+      for (let fr = 0; fr < fillerRows; fr++) {
         if (y + minRowH > doc.page.height - bottomSafety) {
-          // finalize verticals and border for current page's table block
-          drawVerticalsForItemsBlock(tableStartY, filledHeight + headerHeight);
-          doc.rect(tableLeft, tableStartY, usableWidth, filledHeight + headerHeight).stroke();
+          // finalize previous page table visuals
+          drawVerticalsForItemsBlock(tableStartY, headerHeight + totalTableHeight);
+          doc.rect(tableLeft, tableStartY, usableWidth, headerHeight + totalTableHeight).stroke();
 
           doc.addPage();
           y = 36;
 
-          // redraw header area on new page and set new tableStartY
+          // header context on new page
           try { if (fs.existsSync(logoLeftPath)) doc.image(logoLeftPath, 36, y, { width: 40, height: 40 }); } catch (e) {}
           try { if (fs.existsSync(logoRightPath)) doc.image(logoRightPath, pageWidth - 36 - 40, y, { width: 40, height: 40 }); } catch (e) {}
           doc.fontSize(14).font("Helvetica-Bold").text(clinicName || "", 0, y + 6, { align: "center", width: pageWidth });
@@ -12515,7 +13503,7 @@ app.get("/api/bills/:id/full-payment-pdf", async (req, res) => {
           doc.text("FULL PAYMENT RECEIPT", 36, y + 4, { width: usableWidth, align: "center" });
           y += 28;
 
-          // render header again
+          // render header again, reset trackers
           tableStartY = y;
           doc.save().rect(tableLeft, y, usableWidth, headerHeight).fill("#F3F3F3").restore();
           doc.font("Helvetica-Bold").fontSize(9);
@@ -12527,55 +13515,272 @@ app.get("/api/bills/:id/full-payment-pdf", async (req, res) => {
           y += headerHeight;
           doc.moveTo(tableLeft, y).lineTo(tableRightX, y).stroke();
 
-          filledHeight = 0;
+          totalTableHeight = 0;
         }
 
-        // add filler block
+        // filler row
         y += minRowH;
-        filledHeight += minRowH;
+        totalTableHeight += minRowH;
       }
-      totalTableHeight = filledHeight;
+      filledHeight = totalTableHeight;
     }
 
-    // Now draw vertical separators spanning the full visual table block (header + content)
-    const visualTableHeight = headerHeight + totalTableHeight;
+    // draw vertical separators spanning header + content
+    const visualTableHeight = headerHeight + filledHeight;
     drawVerticalsForItemsBlock(tableStartY, visualTableHeight);
 
-    // draw outer border around the whole table block (header + content)
+    // draw outer border around the table block (header + content)
     doc.rect(tableLeft, tableStartY, usableWidth, visualTableHeight).stroke();
 
-    // Place totals box so that it visually attaches to bottom-right of the table block (like image)
+    // ===== Place Total Due box IMMEDIATELY AFTER TABLE (no gap) =====
     const boxWidth = 180;
-    const boxHeight = 36; // two rows height visually
-    // Make the top of the box align exactly with bottom edge of table (so box sits immediately under it)
-    // to mimic the screenshot where totals box is attached to the table bottom-right, we set boxY just below table
+    const boxHeight = 36; // height of totals box
     const boxX = tableRightX - boxWidth;
-    const boxY = tableStartY + visualTableHeight - boxHeight / 2; // slight overlap for visual attachment
+    // place top of box exactly at bottom edge of table (no gap)
+    let boxY = tableStartY + visualTableHeight;
 
-    // Ensure box fits on current page, otherwise add new page and recalc positions
+    // If the box doesn't fit on the current page, add a new page and place it near top (we keep payment details intact)
     if (boxY + boxHeight + 60 > doc.page.height) {
       doc.addPage();
-      // place box at top area on new page
-      // redraw small header block for context
+      // redraw small header area for context
       try { if (fs.existsSync(logoLeftPath)) doc.image(logoLeftPath, 36, 36, { width: 40, height: 40 }); } catch (e) {}
       try { if (fs.existsSync(logoRightPath)) doc.image(logoRightPath, pageWidth - 36 - 40, 36, { width: 40, height: 40 }); } catch (e) {}
       doc.fontSize(14).font("Helvetica-Bold").text(clinicName || "", 0, 42, { align: "center", width: pageWidth });
-      y = 100;
-      // place box in new page's upper area
-      doc.rect(36, y, boxWidth, boxHeight).stroke();
-      doc.font("Helvetica-Bold").fontSize(9).text("Total Due", 36 + 6, y + 6);
-      doc.font("Helvetica").fontSize(9).text(`Rs ${formatMoney(total)}`, 36, y + 6, { width: boxWidth - 8, align: "right" });
-      y += boxHeight + 20;
-    } else {
-      // draw totals box attached to table bottom-right
-      doc.rect(boxX, boxY, boxWidth, boxHeight).stroke();
-      doc.font("Helvetica-Bold").fontSize(9).text("Total Due", boxX + 6, boxY + 6);
-      doc.font("Helvetica").fontSize(9).text(`Rs ${formatMoney(total)}`, boxX, boxY + 6, { width: boxWidth - 8, align: "right" });
-      // advance y below box for footer
-      y = tableStartY + visualTableHeight + 20;
+      // place the box near top of new page (just below header area)
+      boxY = 90;
     }
 
-    // FOOTER NOTE + SIGNATURE
+    // draw the totals box attached to table bottom (or on new page if overflow)
+    doc.rect(boxX, boxY, boxWidth, boxHeight).stroke();
+    doc.font("Helvetica-Bold").fontSize(9).text("Total Due", boxX + 6, boxY + 6);
+    doc.font("Helvetica").fontSize(9).text(`Rs ${formatMoney(total)}`, boxX, boxY + 6, { width: boxWidth - 8, align: "right" });
+
+    // set y to continue AFTER the box (if box was on same page below table, this keeps payment details after box)
+    if (boxY === tableStartY + visualTableHeight) {
+      // box placed immediately after table on same page
+      y = boxY + boxHeight + 8;
+    } else {
+      // box placed on new page near top, set y accordingly to place payment details below
+      y = boxY + boxHeight + 12;
+    }
+
+    // ---------- PAYMENT DETAILS (chronological) — now WITHOUT horizontal lines, vertical separators only, dynamic heights ----------
+    const pTableLeft = 36;
+    const pColDateW = 60; // date/time area
+    const pColRecW = 120;
+    const pColModeW = 60;
+    const pColBankW = 80;
+    const pColRefW = 110;
+    const pColAmtW = usableWidth - (pColDateW + pColRecW + pColModeW + pColBankW + pColRefW);
+
+    const pColDateX = pTableLeft;
+    const pColRecX = pColDateX + pColDateW;
+    const pColModeX = pColRecX + pColRecW;
+    const pColBankX = pColModeX + pColModeW;
+    const pColRefX = pColBankX + pColBankW;
+    const pColAmtX = pColRefX + pColRefW;
+    const pTableRightX = pTableLeft + usableWidth;
+
+    const pHeaderH = 18;
+    const pMinRowH = 16;
+    const pMinTableH = 120; // ensure payments table has a tidy minimum height
+    const pBottomSafety = 120;
+
+    function drawVerticalsForPaymentsBlock(yTop, height) {
+      const xs = [pColDateX, pColRecX, pColModeX, pColBankX, pColRefX, pColAmtX, pTableRightX];
+      xs.forEach((x) => {
+        doc.moveTo(x, yTop).lineTo(x, yTop + height).stroke();
+      });
+    }
+
+    // payments table header placement
+    let pTableStartY = y;
+    doc.save().rect(pTableLeft, y, usableWidth, pHeaderH).fill("#F3F3F3").restore();
+    doc.font("Helvetica-Bold").fontSize(9);
+    doc.text("Date", pColDateX + 4, y + 4, { width: pColDateW - 8 });
+    doc.text("Receipt No.", pColRecX + 4, y + 4, { width: pColRecW - 8 });
+    doc.text("Mode", pColModeX + 4, y + 4, { width: pColModeW - 8 });
+    doc.text("Bank Name", pColBankX + 4, y + 4, { width: pColBankW - 8 });
+    doc.text("Reference", pColRefX + 4, y + 4, { width: pColRefW - 8 });
+    doc.text("Amount", pColAmtX + 4, y + 4, { width: pColAmtW - 8, align: "right" });
+
+    y += pHeaderH;
+    // single horizontal separator UNDER header (like items)
+    doc.moveTo(pTableLeft, y).lineTo(pTableRightX, y).stroke();
+
+    // render payments rows dynamically WITHOUT horizontal borders, track filled height
+    doc.font("Helvetica").fontSize(9);
+    let pFilledHeight = 0;
+    for (let i = 0; i < payments.length; i++) {
+      const p = payments[i];
+
+      const dateTextP = formatDateOnly(p.paymentDateTime || p.paymentDate || `${p.paymentDate || ""}`);
+      const receiptText = p.receiptNo || p.id || "";
+      let modeText = p.mode || "-";
+      if ((modeText === "BankTransfer" || (modeText && modeText.toLowerCase().includes("bank"))) && p.transferType) {
+        modeText = `Bank (${p.transferType})`;
+      }
+      const bankText = p.bankName || "-";
+      const refText = p.referenceNo || "-";
+      const amtText = formatMoney(p.amount || 0);
+
+      // compute heights for each cell
+      const dH = doc.heightOfString(dateTextP, { width: pColDateW - 8 });
+      const rH = doc.heightOfString(receiptText, { width: pColRecW - 8 });
+      const mH = doc.heightOfString(modeText, { width: pColModeW - 8 });
+      const bH = doc.heightOfString(bankText, { width: pColBankW - 8 });
+      const refH = doc.heightOfString(refText, { width: pColRefW - 8 });
+      const aH = doc.heightOfString(amtText, { width: pColAmtW - 8 });
+
+      const maxH = Math.max(dH, rH, mH, bH, refH, aH);
+      const thisRowH = Math.max(pMinRowH, maxH + 8);
+
+      // page-break check before placing row
+      if (y + thisRowH > doc.page.height - pBottomSafety) {
+        // finalize payments block on this page (draw verticals + outer border)
+        const paymentsVisualHeightSoFar = pHeaderH + pFilledHeight;
+        if (paymentsVisualHeightSoFar > 0) {
+          drawVerticalsForPaymentsBlock(pTableStartY, paymentsVisualHeightSoFar);
+          doc.rect(pTableLeft, pTableStartY, usableWidth, paymentsVisualHeightSoFar).stroke();
+        }
+
+        doc.addPage();
+        y = 36;
+
+        // redraw header area/context
+        try { if (fs.existsSync(logoLeftPath)) doc.image(logoLeftPath, 36, y, { width: 40, height: 40 }); } catch (e) {}
+        try { if (fs.existsSync(logoRightPath)) doc.image(logoRightPath, pageWidth - 36 - 40, y, { width: 40, height: 40 }); } catch (e) {}
+        doc.fontSize(14).font("Helvetica-Bold").text(clinicName || "", 0, y + 6, { align: "center", width: pageWidth });
+        doc.fontSize(9).font("Helvetica").text(clinicAddress || "", 0, y + 28, { align: "center", width: pageWidth });
+        y += 56;
+        doc.moveTo(36, y).lineTo(pageWidth - 36, y).stroke();
+        y += 8;
+
+        // if payments header should appear again at top of new page
+        pTableStartY = y;
+        doc.save().rect(pTableLeft, y, usableWidth, pHeaderH).fill("#F3F3F3").restore();
+        doc.font("Helvetica-Bold").fontSize(9);
+        doc.text("Date", pColDateX + 4, y + 4, { width: pColDateW - 8 });
+        doc.text("Receipt No.", pColRecX + 4, y + 4, { width: pColRecW - 8 });
+        doc.text("Mode", pColModeX + 4, y + 4, { width: pColModeW - 8 });
+        doc.text("Bank Name", pColBankX + 4, y + 4, { width: pColBankW - 8 });
+        doc.text("Reference", pColRefX + 4, y + 4, { width: pColRefW - 8 });
+        doc.text("Amount", pColAmtX + 4, y + 4, { width: pColAmtW - 8, align: "right" });
+        y += pHeaderH;
+        doc.moveTo(pTableLeft, y).lineTo(pTableRightX, y).stroke();
+
+        pFilledHeight = 0;
+      }
+
+      // draw cell text (no horizontal border)
+      const rowTop = y;
+      const dateY = rowTop + (thisRowH - dH) / 2;
+      const recY = rowTop + (thisRowH - rH) / 2;
+      const modeY = rowTop + (thisRowH - mH) / 2;
+      const bankY = rowTop + (thisRowH - bH) / 2;
+      const refY = rowTop + (thisRowH - refH) / 2;
+      const amtY = rowTop + (thisRowH - aH) / 2;
+
+      doc.text(dateTextP, pColDateX + 4, dateY, { width: pColDateW - 8 });
+      doc.text(receiptText, pColRecX + 4, recY, { width: pColRecW - 8 });
+      doc.text(modeText, pColModeX + 4, modeY, { width: pColModeW - 8 });
+      doc.text(bankText, pColBankX + 4, bankY, { width: pColBankW - 8 });
+      doc.text(refText, pColRefX + 4, refY, { width: pColRefW - 8 });
+      doc.text(amtText, pColAmtX + 4, amtY, { width: pColAmtW - 8, align: "right" });
+
+      // advance
+      y += thisRowH;
+      pFilledHeight += thisRowH;
+    }
+
+    // After rendering all payments rows on current page, ensure payments block has a minimum visual height
+    if (pFilledHeight < pMinTableH) {
+      const need = pMinTableH - pFilledHeight;
+      const fillerCount = Math.ceil(need / pMinRowH);
+      for (let f = 0; f < fillerCount; f++) {
+        if (y + pMinRowH > doc.page.height - pBottomSafety) {
+          // finalize visuals for this page
+          const paymentsVisualHeightSoFar = pHeaderH + pFilledHeight;
+          if (paymentsVisualHeightSoFar > 0) {
+            drawVerticalsForPaymentsBlock(pTableStartY, paymentsVisualHeightSoFar);
+            doc.rect(pTableLeft, pTableStartY, usableWidth, paymentsVisualHeightSoFar).stroke();
+          }
+          doc.addPage();
+          y = 36;
+
+          // redraw header context and payments header
+          try { if (fs.existsSync(logoLeftPath)) doc.image(logoLeftPath, 36, y, { width: 40, height: 40 }); } catch (e) {}
+          try { if (fs.existsSync(logoRightPath)) doc.image(logoRightPath, pageWidth - 36 - 40, y, { width: 40, height: 40 }); } catch (e) {}
+          doc.fontSize(14).font("Helvetica-Bold").text(clinicName || "", 0, y + 6, { align: "center", width: pageWidth });
+          doc.fontSize(9).font("Helvetica").text(clinicAddress || "", 0, y + 28, { align: "center", width: pageWidth });
+          y += 56;
+          doc.moveTo(36, y).lineTo(pageWidth - 36, y).stroke();
+          y += 8;
+
+          // render header again
+          pTableStartY = y;
+          doc.save().rect(pTableLeft, y, usableWidth, pHeaderH).fill("#F3F3F3").restore();
+          doc.font("Helvetica-Bold").fontSize(9);
+          doc.text("Date", pColDateX + 4, y + 4, { width: pColDateW - 8 });
+          doc.text("Receipt No.", pColRecX + 4, y + 4, { width: pColRecW - 8 });
+          doc.text("Mode", pColModeX + 4, y + 4, { width: pColModeW - 8 });
+          doc.text("Bank Name", pColBankX + 4, y + 4, { width: pColBankW - 8 });
+          doc.text("Reference", pColRefX + 4, y + 4, { width: pColRefW - 8 });
+          doc.text("Amount", pColAmtX + 4, y + 4, { width: pColAmtW - 8, align: "right" });
+          y += pHeaderH;
+          doc.moveTo(pTableLeft, y).lineTo(pTableRightX, y).stroke();
+
+          pFilledHeight = 0;
+        }
+
+        // filler row (visual)
+        y += pMinRowH;
+        pFilledHeight += pMinRowH;
+      }
+    }
+
+    // finalize payments block: draw vertical separators and outer border for the block on the current page
+    if (pFilledHeight > 0) {
+      const paymentsVisualHeight = pHeaderH + pFilledHeight;
+      drawVerticalsForPaymentsBlock(pTableStartY, paymentsVisualHeight);
+      doc.rect(pTableLeft, pTableStartY, usableWidth, paymentsVisualHeight).stroke();
+      // move y pointer to below payments block (ensure some gap)
+      y = pTableStartY + paymentsVisualHeight + 12;
+    }
+
+    // ---------- FOOTER TOTALS BOX (kept as additional summary at left) ----------
+    const boxWidth2 = 260;
+    const boxX2 = 36;
+    const boxY2 = y;
+    const lineH = 14;
+    const rowsCount = 5;
+    const boxHeight2 = rowsCount * lineH + 8;
+
+    // If not enough space, add new page
+    if (boxY2 + boxHeight2 + 60 > doc.page.height) {
+      doc.addPage();
+      y = 36;
+    }
+
+    doc.rect(boxX2, boxY2, boxWidth2, boxHeight2).stroke();
+    let by = boxY2 + 6;
+    doc.font("Helvetica").fontSize(9);
+
+    const addRow = (label, value) => {
+      doc.text(label, boxX2 + 6, by);
+      doc.text(value, boxX2 + 6, by, { width: boxWidth2 - 12, align: "right" });
+      by += lineH;
+    };
+
+    addRow("Total", `Rs ${formatMoney(total)}`);
+    addRow("Total Paid (gross)", `Rs ${formatMoney(totalPaidGross)}`);
+    addRow("Net Paid (after refunds)", `Rs ${formatMoney(netPaid)}`);
+    addRow("Total Refunded", `Rs ${formatMoney(totalRefunded)}`);
+    addRow("Balance", `Rs ${formatMoney(balance)}`);
+
+    y = boxY2 + boxHeight2 + 20;
+
+    // footer note + signatures (same as invoice)
     doc.fontSize(8).text("* This receipt is generated by the clinic. Disputes if any are subject to local jurisdiction.", 36, y, { width: usableWidth });
     const sigY = y + 28;
     const sigWidth = 160;
