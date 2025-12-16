@@ -2035,9 +2035,9 @@ app.get("/api/payments/:id/receipt-html-pdf", async (req, res) => {
         width: pageWidth,
       })
       .text(
-        (clinicPAN || "") +
-          (clinicPAN || clinicRegNo ? "   |   " : "") +
-          (clinicRegNo || ""),
+        (clinicPAN ? `PAN: ${clinicPAN}` : "") +
+          (clinicPAN && clinicRegNo ? "   |   " : "") +
+          (clinicRegNo ? `Reg. No.: ${clinicRegNo}` : ""),
         {
           align: "center",
           width: pageWidth,
@@ -2512,9 +2512,9 @@ app.get("/api/refunds/:id/refund-html-pdf", async (req, res) => {
         width: pageWidth,
       })
       .text(
-        (clinicPAN || "") +
-          (clinicPAN || clinicRegNo ? "   |   " : "") +
-          (clinicRegNo || ""),
+        (clinicPAN ? `PAN: ${clinicPAN}` : "") +
+          (clinicPAN && clinicRegNo ? "   |   " : "") +
+          (clinicRegNo ? `Reg. No.: ${clinicRegNo}` : ""),
         {
           align: "center",
           width: pageWidth,
@@ -2815,767 +2815,7 @@ app.put("/api/refunds/:id", async (req, res) => {
   }
 });
 
-// app.get("/api/bills/:id/summary-pdf", async (req, res) => {
-//   const billId = req.params.id;
-//   if (!billId) return res.status(400).json({ error: "Invalid bill id" });
-
-//   try {
-//     const billRef = db.collection("bills").doc(billId);
-//     const billSnap = await billRef.get();
-//     if (!billSnap.exists) {
-//       return res.status(404).json({ error: "Bill not found" });
-//     }
-//     const bill = billSnap.data();
-
-//     const billTotal = Number(bill.total || 0);
-
-//     // --- PAYMENTS ---
-//     const paysSnap = await db
-//       .collection("payments")
-//       .where("billId", "==", billId)
-//       .get();
-
-//     const payments = paysSnap.docs.map((doc) => {
-//       const d = doc.data();
-//       const paymentDateTime = d.paymentDate
-//         ? `${d.paymentDate}T00:00:00.000Z`
-//         : d.paymentDateTime || null;
-//       return {
-//         id: doc.id,
-//         amount: Number(d.amount || 0),
-//         paymentDateTime,
-//         mode: d.mode || "",
-//         referenceNo: d.referenceNo || null,
-//         receiptNo: d.receiptNo || null,
-//       };
-//     });
-
-//     payments.sort((a, b) => {
-//       const da = a.paymentDateTime ? new Date(a.paymentDateTime) : new Date(0);
-//       const dbb = b.paymentDateTime ? new Date(b.paymentDateTime) : new Date(0);
-//       return da - dbb;
-//     });
-
-//     const totalPaidGross = payments.reduce(
-//       (sum, p) => sum + Number(p.amount || 0),
-//       0
-//     );
-
-//     // --- REFUNDS ---
-//     const refundsSnap = await db
-//       .collection("refunds")
-//       .where("billId", "==", billId)
-//       .get();
-
-//     const refunds = refundsSnap.docs.map((doc) => {
-//       const d = doc.data();
-//       const refundDateTime = d.refundDate
-//         ? `${d.refundDate}T00:00:00.000Z`
-//         : d.refundDateTime || null;
-//       return {
-//         id: doc.id,
-//         amount: Number(d.amount || 0),
-//         refundDateTime,
-//         mode: d.mode || "",
-//         referenceNo: d.referenceNo || null,
-//         refundNo: d.refundReceiptNo || null,
-//       };
-//     });
-
-//     refunds.sort((a, b) => {
-//       const da = a.refundDateTime ? new Date(a.refundDateTime) : new Date(0);
-//       const dbb = b.refundDateTime ? new Date(b.refundDateTime) : new Date(0);
-//       return da - dbb;
-//     });
-
-//     const totalRefunded = refunds.reduce(
-//       (sum, r) => sum + Number(r.amount || 0),
-//       0
-//     );
-
-//     const netPaid = totalPaidGross - totalRefunded;
-//     const balance = billTotal - netPaid;
-
-//     const paymentsCount = payments.length;
-//     const refundsCount = refunds.length;
-
-//     const patientName = bill.patientName || "";
-//     const address = bill.address || "";
-//     const invoiceNo = bill.invoiceNo || billId;
-//     const billDate = bill.date || "";
-//     const status = bill.status || (balance <= 0 ? "PAID" : "PENDING");
-
-//     function formatMoney(v) {
-//       return Number(v || 0).toFixed(2);
-//     }
-
-//     function formatDateTime(dtString) {
-//       if (!dtString) return "";
-//       return typeof formatDateTimeDot === "function"
-//         ? formatDateTimeDot(dtString)
-//         : dtString;
-//     }
-//     function formatDateOnly(dtString) {
-//       if (!dtString) return "";
-//       return typeof formatDateDot === "function"
-//         ? formatDateDot(dtString)
-//         : String(dtString).split("T")[0];
-//     }
-
-//     // --------- BUILD CHRONOLOGICAL TIMELINE ---------
-//     const timeline = [];
-
-//     const invoiceDateTime =
-//       bill.createdAt || (bill.date ? `${bill.date}T00:00:00.000Z` : null);
-
-//     timeline.push({
-//       type: "INVOICE",
-//       label: "Invoice Generated",
-//       dateTime: invoiceDateTime,
-//       mode: "-",
-//       ref: invoiceNo,
-//       debit: billTotal,
-//       credit: 0,
-//     });
-
-//     payments.forEach((p) => {
-//       timeline.push({
-//         type: "PAYMENT",
-//         label: p.receiptNo ? `Payment Receipt (${p.receiptNo})` : "Payment",
-//         dateTime: p.paymentDateTime,
-//         mode: p.mode || "",
-//         ref: p.referenceNo || "",
-//         debit: 0,
-//         credit: p.amount,
-//       });
-//     });
-
-//     refunds.forEach((r) => {
-//       timeline.push({
-//         type: "REFUND",
-//         label: r.refundNo ? `Refund (${r.refundNo})` : "Refund",
-//         dateTime: r.refundDateTime,
-//         mode: r.mode || "",
-//         ref: r.referenceNo || "",
-//         debit: r.amount,
-//         credit: 0,
-//       });
-//     });
-
-//     timeline.sort((a, b) => {
-//       const da = a.dateTime ? new Date(a.dateTime) : new Date(0);
-//       const dbb = b.dateTime ? new Date(b.dateTime) : new Date(0);
-//       return da - dbb;
-//     });
-
-//     // ---------- FETCH CLINIC PROFILE FRESH FOR PDF ----------
-//     const profile = await getClinicProfile({ force: true });
-//     const clinicName = profileValue(profile, "clinicName");
-//     const clinicAddress = profileValue(profile, "address");
-//     const clinicPAN = profileValue(profile, "pan");
-//     const clinicRegNo = profileValue(profile, "regNo");
-//     const doctor1Name = profileValue(profile, "doctor1Name");
-//     const doctor1RegNo = profileValue(profile, "doctor1RegNo");
-//     const doctor2Name = profileValue(profile, "doctor2Name");
-//     const doctor2RegNo = profileValue(profile, "doctor2RegNo");
-//     const patientRepresentative = profileValue(
-//       profile,
-//       "patientRepresentative"
-//     );
-//     const clinicRepresentative = profileValue(profile, "clinicRepresentative");
-
-//     // ---------- PDF START ----------
-//     res.setHeader("Content-Type", "application/pdf");
-//     res.setHeader(
-//       "Content-Disposition",
-//       `inline; filename="bill-summary-${billId}.pdf"`
-//     );
-
-//     const doc = new PDFDocument({
-//       size: "A4",
-//       margin: 36,
-//     });
-
-//     doc.pipe(res);
-
-//     const pageWidth = doc.page.width;
-//     const usableWidth = pageWidth - 72;
-//     let y = 40;
-
-//     const logoLeftPath = path.join(__dirname, "resources", "logo-left.png");
-//     const logoRightPath = path.join(__dirname, "resources", "logo-right.png");
-
-//     const leftX = 36;
-//     const rightX = pageWidth - 36;
-
-//     try {
-//       doc.image(logoLeftPath, leftX, y, { width: 32, height: 32 });
-//     } catch (e) {}
-//     try {
-//       doc.image(logoRightPath, rightX - 32, y, { width: 32, height: 32 });
-//     } catch (e) {}
-
-//     doc
-//       .font("Helvetica-Bold")
-//       .fontSize(13)
-//       .text(clinicName || "", 0, y + 2, {
-//         align: "center",
-//         width: pageWidth,
-//       });
-
-//     doc
-//       .font("Helvetica")
-//       .fontSize(9)
-//       .text(clinicAddress || "", 0, y + 20, {
-//         align: "center",
-//         width: pageWidth,
-//       })
-//       .text(
-//         (clinicPAN || "") +
-//           (clinicPAN || clinicRegNo ? "   |   " : "") +
-//           (clinicRegNo || ""),
-//         {
-//           align: "center",
-//           width: pageWidth,
-//         }
-//       );
-
-//     y += 48;
-
-//     doc
-//       .moveTo(36, y)
-//       .lineTo(pageWidth - 36, y)
-//       .stroke();
-//     y += 6;
-
-//     // static doctor header
-//     doc.font("Helvetica-Bold").fontSize(9);
-//     doc.text(doctor1Name || "", 36, y);
-//     doc.text(doctor2Name || "", pageWidth / 2, y, {
-//       align: "right",
-//       width: usableWidth / 2,
-//     });
-
-//     y += 12;
-//     doc.font("Helvetica").fontSize(8);
-//     doc.text(doctor1RegNo ? `Reg. No.: ${doctor1RegNo}` : "", 36, y);
-//     doc.text(
-//       doctor2RegNo ? `Reg. No.: ${doctor2RegNo}` : "",
-//       pageWidth / 2,
-//       y,
-//       {
-//         align: "right",
-//         width: usableWidth / 2,
-//       }
-//     );
-
-//     y += 16;
-
-//     // title bar (same style)
-//     doc
-//       .save()
-//       .rect(36, y, usableWidth, 16)
-//       .fill("#F3F3F3")
-//       .restore()
-//       .rect(36, y, usableWidth, 16)
-//       .stroke();
-
-//     doc
-//       .font("Helvetica-Bold")
-//       .fontSize(10)
-//       .text("BILL SUMMARY", 36, y + 3, {
-//         align: "center",
-//         width: usableWidth,
-//       });
-
-//     y += 24;
-
-//     // invoice / patient line
-//     doc.font("Helvetica").fontSize(9);
-//     doc.text(`Invoice No.: ${invoiceNo}`, 36, y);
-//     doc.text(
-//       `Date: ${
-//         typeof formatDateDot === "function" ? formatDateDot(billDate) : billDate
-//       }`,
-//       pageWidth / 2,
-//       y,
-//       {
-//         align: "right",
-//         width: usableWidth / 2,
-//       }
-//     );
-
-//     y += 12;
-
-//     doc.text(`Patient Name: ${patientName}`, 36, y, {
-//       width: usableWidth,
-//     });
-//     doc.font("Helvetica").text(`Address: ${address}`, 36, doc.y + 3, {
-//       width: usableWidth,
-//     });
-
-//     y += 28;
-
-//     // --------- CHRONOLOGICAL TABLE (invoice-html-pdf style) ---------
-//     const tableLeft = 36;
-//     const colDateW = 60;
-//     const colPartW = 160;
-//     const colModeW = 60;
-//     const colRefW = 80;
-//     const colDebitW = 50;
-//     const colCreditW = 50;
-//     const colBalW =
-//       usableWidth -
-//       (colDateW + colPartW + colModeW + colRefW + colDebitW + colCreditW);
-
-//     const colDateX = tableLeft;
-//     const colPartX = colDateX + colDateW;
-//     const colModeX = colPartX + colPartW;
-//     const colRefX = colModeX + colModeW;
-//     const colDebitX = colRefX + colRefW;
-//     const colCreditX = colDebitX + colDebitW;
-//     const colBalX = colCreditX + colCreditW;
-//     const tableRightX = tableLeft + usableWidth;
-
-//     // layout constants (we'll use dynamic row heights)
-//     const headerHeight = 18;
-//     const minRowHeight = 14; // minimum per-row height
-//     const minTableHeight = 200;
-//     const bottomSafety = 120;
-
-//     // helper to draw vertical separators for a vertical segment (on current page)
-//     function drawVerticalsForSegment(yTop, height) {
-//       const xs = [
-//         colDateX,
-//         colPartX,
-//         colModeX,
-//         colRefX,
-//         colDebitX,
-//         colCreditX,
-//         colBalX,
-//         tableRightX,
-//       ];
-//       const top = yTop;
-//       const bottom = yTop + height;
-//       xs.forEach((x) => {
-//         doc.moveTo(x, top).lineTo(x, bottom).stroke();
-//       });
-//     }
-
-//     // remember table start y so we can enforce min height later
-//     const tableStartY = y;
-
-//     // header background + border
-//     const headerTopY = y;
-//     doc
-//       .save()
-//       .rect(tableLeft, headerTopY, usableWidth, headerHeight)
-//       .fill("#F3F3F3")
-//       .restore()
-//       .rect(tableLeft, headerTopY, usableWidth, headerHeight)
-//       .stroke();
-
-//     // draw vertical separators for header (same as body)
-//     drawVerticalsForSegment(headerTopY, headerHeight);
-
-//     doc.font("Helvetica-Bold").fontSize(8);
-//     doc.text("Date", colDateX + 4, headerTopY + 5, {
-//       width: colDateW - 6,
-//     });
-//     doc.text("Particulars", colPartX + 4, headerTopY + 5, {
-//       width: colPartW - 6,
-//     });
-//     doc.text("Mode", colModeX + 4, headerTopY + 5, {
-//       width: colModeW - 6,
-//     });
-//     doc.text("Reference", colRefX + 4, headerTopY + 5, {
-//       width: colRefW - 6,
-//     });
-//     doc.text("Debit (Rs)", colDebitX + 4, headerTopY + 5, {
-//       width: colDebitW - 6,
-//       align: "right",
-//     });
-//     doc.text("Credit (Rs)", colCreditX + 4, headerTopY + 5, {
-//       width: colCreditW - 6,
-//       align: "right",
-//     });
-//     doc.text("Balance (Rs)", colBalX + 4, headerTopY + 5, {
-//       width: colBalW - 6,
-//       align: "right",
-//     });
-
-//     y += headerHeight;
-
-//     // draw a single horizontal separator line just below the header
-//     doc.moveTo(tableLeft, y).lineTo(tableRightX, y).stroke();
-
-//     // accumulate vertical segment per page
-//     let segmentStartY = y;
-//     let segmentHeight = 0;
-
-//     doc.font("Helvetica").fontSize(8);
-
-//     let runningBalance = 0;
-
-//     // iterate timeline and render rows with dynamic heights
-//     for (let i = 0; i < timeline.length; i++) {
-//       const ev = timeline[i];
-
-//       // Prepare cell strings
-//       const dateStr = formatDateOnly(ev.dateTime);
-//       const partStr = ev.label || "";
-//       const modeStr = ev.mode || "";
-//       const refStr = ev.ref || "";
-//       const debitStr = ev.debit ? formatMoney(ev.debit) : "";
-//       const creditStr = ev.credit ? formatMoney(ev.credit) : "";
-
-//       // compute heights for each cell given available column width and current font settings
-//       // use a small padding (top + bottom) for aesthetics
-//       const padding = 6; // total vertical padding (we add on top when placing text)
-//       const dateH = doc.heightOfString(String(dateStr), {
-//         width: colDateW - 8,
-//       });
-//       const partH = doc.heightOfString(String(partStr), {
-//         width: colPartW - 8,
-//       });
-//       const modeH = doc.heightOfString(String(modeStr), {
-//         width: colModeW - 8,
-//       });
-//       const refH = doc.heightOfString(String(refStr), { width: colRefW - 8 });
-//       const debitH = doc.heightOfString(String(debitStr), {
-//         width: colDebitW - 8,
-//       });
-//       const creditH = doc.heightOfString(String(creditStr), {
-//         width: colCreditW - 8,
-//       });
-//       const balH = doc.heightOfString(
-//         String(
-//           formatMoney(
-//             ev.type === "INVOICE"
-//               ? ev.debit - ev.credit
-//               : runningBalance + ev.debit - ev.credit
-//           )
-//         ),
-//         { width: colBalW - 8 }
-//       );
-
-//       // Determine the row height as the max of cell heights + padding; enforce minimum
-//       const contentMaxH = Math.max(
-//         dateH,
-//         partH,
-//         modeH,
-//         refH,
-//         debitH,
-//         creditH,
-//         balH
-//       );
-//       let rowH = Math.max(minRowHeight, contentMaxH + padding);
-
-//       // Before rendering, check for page break: need space for this row + bottomSafety
-//       if (y + rowH > doc.page.height - bottomSafety) {
-//         // draw verticals for the segment we just filled on THIS page
-//         if (segmentHeight > 0) {
-//           drawVerticalsForSegment(segmentStartY, segmentHeight);
-//         }
-
-//         doc.addPage();
-//         y = 36;
-
-//         // redraw small page header area (logos optional)
-//         try {
-//           doc.image(logoLeftPath, leftX, y, { width: 32, height: 32 });
-//         } catch (e) {}
-//         try {
-//           doc.image(logoRightPath, rightX - 32, y, { width: 32, height: 32 });
-//         } catch (e) {}
-//         // clinic name
-//         doc
-//           .font("Helvetica-Bold")
-//           .fontSize(13)
-//           .text(clinicName || "", 0, y + 2, {
-//             align: "center",
-//             width: pageWidth,
-//           });
-//         doc
-//           .font("Helvetica")
-//           .fontSize(9)
-//           .text(clinicAddress || "", 0, y + 20, {
-//             align: "center",
-//             width: pageWidth,
-//           });
-//         y += 48;
-//         doc
-//           .moveTo(36, y)
-//           .lineTo(pageWidth - 36, y)
-//           .stroke();
-//         y += 6;
-
-//         // redraw header on new page
-//         const headerTopY2 = y;
-//         doc
-//           .save()
-//           .rect(tableLeft, headerTopY2, usableWidth, headerHeight)
-//           .fill("#F3F3F3")
-//           .restore()
-//           .rect(tableLeft, headerTopY2, usableWidth, headerHeight)
-//           .stroke();
-//         drawVerticalsForSegment(headerTopY2, headerHeight);
-
-//         doc.font("Helvetica-Bold").fontSize(8);
-//         doc.text("Date & Time", colDateX + 4, headerTopY2 + 5, {
-//           width: colDateW - 6,
-//         });
-//         doc.text("Particulars", colPartX + 4, headerTopY2 + 5, {
-//           width: colPartW - 6,
-//         });
-//         doc.text("Mode", colModeX + 4, headerTopY2 + 5, {
-//           width: colModeW - 6,
-//         });
-//         doc.text("Reference", colRefX + 4, headerTopY2 + 5, {
-//           width: colRefW - 6,
-//         });
-//         doc.text("Debit (Rs)", colDebitX + 4, headerTopY2 + 5, {
-//           width: colDebitW - 6,
-//           align: "right",
-//         });
-//         doc.text("Credit (Rs)", colCreditX + 4, headerTopY2 + 5, {
-//           width: colCreditW - 6,
-//           align: "right",
-//         });
-//         doc.text("Balance (Rs)", colBalX + 4, headerTopY2 + 5, {
-//           width: colBalW - 6,
-//           align: "right",
-//         });
-
-//         y += headerHeight;
-//         doc.moveTo(tableLeft, y).lineTo(tableRightX, y).stroke();
-
-//         // reset segment tracking for the new page
-//         segmentStartY = y;
-//         segmentHeight = 0;
-
-//         doc.font("Helvetica").fontSize(8);
-//       }
-
-//       // compute running balance BEFORE drawing balance cell so height calc aligns with displayed balance
-//       if (ev.type === "INVOICE") {
-//         runningBalance = ev.debit - ev.credit;
-//       } else {
-//         runningBalance += ev.debit;
-//         runningBalance -= ev.credit;
-//       }
-
-//       // Draw the content at y with vertical padding of 3 (top)
-//       const cellTop = y + 3;
-//       doc.text(dateStr, colDateX + 4, cellTop, { width: colDateW - 8 });
-//       doc.text(partStr, colPartX + 4, cellTop, { width: colPartW - 8 });
-//       doc.text(modeStr, colModeX + 4, cellTop, { width: colModeW - 8 });
-//       doc.text(refStr, colRefX + 4, cellTop, { width: colRefW - 8 });
-//       doc.text(ev.debit ? formatMoney(ev.debit) : "", colDebitX + 4, cellTop, {
-//         width: colDebitW - 8,
-//         align: "right",
-//       });
-//       doc.text(
-//         ev.credit ? formatMoney(ev.credit) : "",
-//         colCreditX + 4,
-//         cellTop,
-//         { width: colCreditW - 8, align: "right" }
-//       );
-//       doc.text(formatMoney(runningBalance), colBalX + 4, cellTop, {
-//         width: colBalW - 8,
-//         align: "right",
-//       });
-
-//       // Advance y by rowH and add to segmentHeight
-//       y += rowH;
-//       segmentHeight += rowH;
-//     }
-
-//     // After drawing timeline rows, ensure table has minimum visual height (fill empty rows)
-//     const currentTableHeight = y - tableStartY;
-//     if (currentTableHeight < minTableHeight) {
-//       let remainingHeight = minTableHeight - currentTableHeight;
-//       // for filler rows we'll use minRowHeight
-//       const emptyRows = Math.ceil(remainingHeight / minRowHeight);
-//       for (let i = 0; i < emptyRows; i++) {
-//         // page break handling for filler rows
-//         if (y + minRowHeight > doc.page.height - bottomSafety) {
-//           if (segmentHeight > 0) {
-//             drawVerticalsForSegment(segmentStartY, segmentHeight);
-//           }
-//           doc.addPage();
-//           y = 36;
-
-//           // redraw condensed header area and table header on new page
-//           try {
-//             doc.image(logoLeftPath, leftX, y, { width: 32, height: 32 });
-//           } catch (e) {}
-//           try {
-//             doc.image(logoRightPath, rightX - 32, y, { width: 32, height: 32 });
-//           } catch (e) {}
-//           doc
-//             .font("Helvetica-Bold")
-//             .fontSize(13)
-//             .text(clinicName || "", 0, y + 2, {
-//               align: "center",
-//               width: pageWidth,
-//             });
-//           doc
-//             .font("Helvetica")
-//             .fontSize(9)
-//             .text(clinicAddress || "", 0, y + 20, {
-//               align: "center",
-//               width: pageWidth,
-//             });
-//           y += 48;
-//           doc
-//             .moveTo(36, y)
-//             .lineTo(pageWidth - 36, y)
-//             .stroke();
-//           y += 6;
-
-//           const headerTopY3 = y;
-//           doc
-//             .save()
-//             .rect(tableLeft, headerTopY3, usableWidth, headerHeight)
-//             .fill("#F3F3F3")
-//             .restore()
-//             .rect(tableLeft, headerTopY3, usableWidth, headerHeight)
-//             .stroke();
-//           drawVerticalsForSegment(headerTopY3, headerHeight);
-
-//           doc.font("Helvetica-Bold").fontSize(8);
-//           doc.text("Date & Time", colDateX + 4, headerTopY3 + 5, {
-//             width: colDateW - 6,
-//           });
-//           doc.text("Particulars", colPartX + 4, headerTopY3 + 5, {
-//             width: colPartW - 6,
-//           });
-//           doc.text("Mode", colModeX + 4, headerTopY3 + 5, {
-//             width: colModeW - 6,
-//           });
-//           doc.text("Reference", colRefX + 4, headerTopY3 + 5, {
-//             width: colRefW - 6,
-//           });
-//           doc.text("Debit (Rs)", colDebitX + 4, headerTopY3 + 5, {
-//             width: colDebitW - 6,
-//             align: "right",
-//           });
-//           doc.text("Credit (Rs)", colCreditX + 4, headerTopY3 + 5, {
-//             width: colCreditW - 6,
-//             align: "right",
-//           });
-//           doc.text("Balance (Rs)", colBalX + 4, headerTopY3 + 5, {
-//             width: colBalW - 6,
-//             align: "right",
-//           });
-
-//           y += headerHeight;
-//           doc.moveTo(tableLeft, y).lineTo(tableRightX, y).stroke();
-
-//           segmentStartY = y;
-//           segmentHeight = 0;
-//           doc.font("Helvetica").fontSize(8);
-//         }
-
-//         // add an empty visual filler row
-//         y += minRowHeight;
-//         segmentHeight += minRowHeight;
-//       }
-//     }
-
-//     // finally, draw vertical separators for the last page's segment
-//     if (segmentHeight > 0) {
-//       drawVerticalsForSegment(segmentStartY, segmentHeight);
-//     }
-
-//     // draw a single horizontal separator line after the last content row (immediately above totals)
-//     doc.moveTo(tableLeft, y).lineTo(tableRightX, y).stroke();
-
-//     // --------- TOTALS BOX (placed on right like invoice) ---------
-//     const boxWidth = 220;
-//     const boxX = pageWidth - 36 - boxWidth;
-//     const boxY = y;
-//     const lineH2 = 16; // row height in box
-//     const rows2 = 6;
-//     const boxHeight = lineH2 * rows2 + 8;
-
-//     // If not enough space, move to new page
-//     if (boxY + boxHeight + 60 > doc.page.height) {
-//       doc.addPage();
-//       y = 36;
-//     }
-
-//     doc.rect(boxX, boxY, boxWidth, boxHeight).stroke();
-
-//     let by3 = boxY + 6;
-//     doc.font("Helvetica").fontSize(9);
-//     function boxRow(label, value) {
-//       doc
-//         .font("Helvetica")
-//         .fontSize(9)
-//         .text(label, boxX + 8, by3);
-//       doc.text(value, boxX + 8, by3, { width: boxWidth - 16, align: "right" });
-//       by3 += lineH2;
-//     }
-
-//     boxRow("Bill Total", `Rs ${formatMoney(billTotal)}`);
-//     boxRow("Total Paid (gross)", `Rs ${formatMoney(totalPaidGross)}`);
-//     boxRow("Total Refunded", `Rs ${formatMoney(totalRefunded)}`);
-//     boxRow("Net Paid", `Rs ${formatMoney(netPaid)}`);
-//     boxRow("Balance", `Rs ${formatMoney(balance)}`);
-//     boxRow("Status", status);
-
-//     // move y below totals box for signature / footer
-//     y = boxY + boxHeight + 20;
-
-//     // FOOTER NOTES (left)
-//     doc
-//       .fontSize(8)
-//       .text("* Dispute if any Subject to Jamshedpur Jurisdiction", 36, y, {
-//         width: usableWidth,
-//       });
-
-//     y = y + 30;
-
-//     // SIGNATURE LINES (patient left, clinic right) - similar to invoice
-//     const sigWidth = 160;
-//     const sigY = y;
-
-//     // doc
-//     //   .moveTo(36, sigY)
-//     //   .lineTo(36 + sigWidth, sigY)
-//     //   .dash(1, { space: 2 })
-//     //   .stroke()
-//     //   .undash();
-//     // doc.fontSize(8).text(patientRepresentative || "", 36, sigY + 4, {
-//     //   width: sigWidth,
-//     //   align: "center",
-//     // });
-
-//     const rightSigX2 = pageWidth - 36 - sigWidth;
-//     doc
-//       .moveTo(rightSigX2, sigY)
-//       .lineTo(rightSigX2 + sigWidth, sigY)
-//       .dash(1, { space: 2 })
-//       .stroke()
-//       .undash();
-//     doc.fontSize(8).text(clinicRepresentative || "", rightSigX2, sigY + 4, {
-//       width: sigWidth,
-//       align: "center",
-//     });
-
-//     doc.end();
-//   } catch (err) {
-//     console.error("summary-pdf error:", err);
-//     if (!res.headersSent) {
-//       res.status(500).json({ error: "Failed to generate summary PDF" });
-//     }
-//   }
-// });
-
-// ---------- PUT /api/bills/:id (edit bill: patient + services, NOT payments) ----------
-
+// ---------- PDF: Bill Summary (A4 full page, chronological timeline) ----------
 app.get("/api/bills/:id/summary-pdf", async (req, res) => {
   const billId = req.params.id;
   if (!billId) return res.status(400).json({ error: "Invalid bill id" });
@@ -3597,6 +2837,7 @@ app.get("/api/bills/:id/summary-pdf", async (req, res) => {
       const paymentDateTime = d.paymentDate
         ? `${d.paymentDate}T00:00:00.000Z`
         : d.paymentDateTime || null;
+
       return {
         id: doc.id,
         amount: Number(d.amount || 0),
@@ -3604,8 +2845,10 @@ app.get("/api/bills/:id/summary-pdf", async (req, res) => {
         mode: d.mode || "",
         referenceNo: d.referenceNo || null,
         receiptNo: d.receiptNo || null,
+        chequeNo: d.chequeNo || null, // <-- yeh line
       };
     });
+
     payments.sort((a, b) => {
       const da = a.paymentDateTime ? new Date(a.paymentDateTime) : new Date(0);
       const dbb = b.paymentDateTime ? new Date(b.paymentDateTime) : new Date(0);
@@ -3681,16 +2924,19 @@ app.get("/api/bills/:id/summary-pdf", async (req, res) => {
       credit: 0,
     });
     payments.forEach((p) => {
+      const isCheque = (p.mode || "").toLowerCase() === "cheque";
+
       timeline.push({
         type: "PAYMENT",
         label: p.receiptNo ? `Payment Receipt (${p.receiptNo})` : "Payment",
         dateTime: p.paymentDateTime,
         mode: p.mode || "",
-        ref: p.referenceNo || "",
+        ref: isCheque && p.chequeNo ? p.chequeNo : p.referenceNo || "",
         debit: 0,
         credit: p.amount,
       });
     });
+
     refunds.forEach((r) => {
       timeline.push({
         type: "REFUND",
@@ -5201,10 +4447,10 @@ app.get("/api/bills/:id/full-payment-pdf", async (req, res) => {
     const pHeaderTextYOffset = headerPadding + 3;
 
     // HEADER TEXT CHANGE:
-    doc.text("Payment Date", pColDateX + 4, y + pHeaderTextYOffset, {
+    doc.text("Date", pColDateX + 4, y + pHeaderTextYOffset, {
       width: pColDateW - 8,
     });
-    doc.text("Transfer Date", pColPaymentDateX + 4, y + pHeaderTextYOffset, {
+    doc.text("Payment Date", pColPaymentDateX + 4, y + pHeaderTextYOffset, {
       width: pColPaymentDateW - 8,
     });
     doc.text("Receipt No.", pColRecX + 4, y + pHeaderTextYOffset, {
@@ -5216,7 +4462,7 @@ app.get("/api/bills/:id/full-payment-pdf", async (req, res) => {
     doc.text("Bank Name", pColBankX + 4, y + pHeaderTextYOffset, {
       width: pColBankW - 8,
     });
-    doc.text("Reference", pColRefX + 4, y + pHeaderTextYOffset, {
+    doc.text("Reference / Cheque No.", pColRefX + 4, y + pHeaderTextYOffset, {
       width: pColRefW - 8,
     });
     doc.text("Amount", pColAmtX + 4, y + pHeaderTextYOffset, {
@@ -5257,8 +4503,23 @@ app.get("/api/bills/:id/full-payment-pdf", async (req, res) => {
       ) {
         modeText = `Bank (${p.transferType})`;
       }
-      const bankText = p.bankName || "-";
-      const refText = p.referenceNo || "-";
+      let bankText = "-";
+      let refText = "-";
+
+      if (p.mode === "Cheque") {
+        // Cheque → Reference column me Cheque No.
+        refText = p.chequeNumber || p.referenceNo || "-";
+        bankText = p.bankName || "-";
+      } else if (p.mode === "UPI") {
+        // UPI → Bank Name column me UPI ID
+        bankText = p.upiId || "-";
+        refText = p.referenceNo || "-";
+      } else {
+        // Cash / BankTransfer default
+        bankText = p.bankName || "-";
+        refText = p.referenceNo || "-";
+      }
+
       const amtText = formatMoney(p.amount || 0);
 
       // compute heights
@@ -5320,11 +4581,11 @@ app.get("/api/bills/:id/full-payment-pdf", async (req, res) => {
           .fill("#F3F3F3")
           .restore();
         doc.font("Helvetica-Bold").fontSize(9);
-        doc.text("Payment Date", pColDateX + 4, y + pHeaderTextYOffset, {
+        doc.text("Date", pColDateX + 4, y + pHeaderTextYOffset, {
           width: pColDateW - 8,
         });
         doc.text(
-          "Transfer Date",
+          "Payment Date",
           pColPaymentDateX + 4,
           y + pHeaderTextYOffset,
           { width: pColPaymentDateW - 8 }
@@ -5424,11 +4685,11 @@ app.get("/api/bills/:id/full-payment-pdf", async (req, res) => {
             .fill("#F3F3F3")
             .restore();
           doc.font("Helvetica-Bold").fontSize(9);
-          doc.text("Payment Date", pColDateX + 4, y + pHeaderTextYOffset, {
+          doc.text("Date", pColDateX + 4, y + pHeaderTextYOffset, {
             width: pColDateW - 8,
           });
           doc.text(
-            "Transfer Date",
+            "Payment Date",
             pColPaymentDateX + 4,
             y + pHeaderTextYOffset,
             { width: pColPaymentDateW - 8 }
@@ -5577,6 +4838,7 @@ app.get("/api/profile", async (_req, res) => {
 app.put("/api/profile", async (req, res) => {
   try {
     const {
+      session,
       clinicName,
       address,
       pan,
@@ -5593,6 +4855,7 @@ app.put("/api/profile", async (req, res) => {
     } = req.body;
 
     const profileData = {
+      session: session || "",
       clinicName: clinicName || "",
       address: address || "",
       pan: pan || "",
