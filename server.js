@@ -446,6 +446,7 @@ app.post("/api/bills", async (req, res) => {
       pay,
       paymentMode,
       referenceNo,
+      procedureDone,
 
       // NEW – mode-specific payment fields from CreateBill
       chequeDate,
@@ -529,6 +530,7 @@ app.post("/api/bills", async (req, res) => {
       address: address || "",
       age: age ? Number(age) : null,
       date: jsDateISO, // stored ISO for queries; display uses formatDateDot
+      procedureDone: procedureDone || null,
       invoiceNo: invoiceNo,
       total,
       paid: firstPay,
@@ -618,6 +620,7 @@ app.post("/api/bills", async (req, res) => {
       address,
       age: age ? Number(age) : null,
       date: jsDateISO,
+      procedureDone,
       total,
       paid: firstPay,
       refunded,
@@ -648,6 +651,7 @@ app.post("/api/bills", async (req, res) => {
         address: address || "",
         age: age ? Number(age) : null,
         date: formatDateDot(jsDateISO),
+        procedureDone: procedureDone || null,
         total,
         paid: firstPay,
         refunded,
@@ -797,6 +801,7 @@ app.get("/api/bills/:id", async (req, res) => {
         age: bill.age || null,
         //date: formatDateDot(bill.date || null),
         date: bill.date || null,
+        procedureDone: bill.procedureDone || null,
         total,
         paid: netPaid,
         refunded: totalRefunded,
@@ -3484,8 +3489,16 @@ app.put("/api/bills/:id", async (req, res) => {
     const oldBill = billSnap.data();
 
     // Editable fields from frontend (everything except payment info)
-    const { patientName, sex, address, age, date, remarks, services } =
-      req.body;
+    const {
+      patientName,
+      sex,
+      address,
+      age,
+      date,
+      remarks,
+      services,
+      procedureDone, // ✅ ADD
+    } = req.body;
 
     if (!date && !oldBill.date) {
       return res.status(400).json({ error: "Bill date is required" });
@@ -3542,6 +3555,11 @@ app.put("/api/bills/:id", async (req, res) => {
       address: address ?? oldBill.address ?? "",
       age: typeof age !== "undefined" ? Number(age) : oldBill.age ?? null,
       date: jsDate,
+      procedureDone:
+        typeof procedureDone !== "undefined"
+          ? procedureDone
+          : oldBill.procedureDone ?? null,
+
       total,
       paid: paidGross,
       refunded,
@@ -3704,6 +3722,1118 @@ app.delete("/api/bills/:id", async (req, res) => {
   }
 });
 
+// app.get("/api/bills/:id/full-payment-pdf", async (req, res) => {
+//   const id = req.params.id;
+//   if (!id) return res.status(400).json({ error: "Invalid bill id" });
+
+//   function formatMoney(v) {
+//     return Number(v || 0).toFixed(2);
+//   }
+
+//   function formatDateOnly(dtString) {
+//     return typeof formatDateDot === "function"
+//       ? formatDateDot(dtString)
+//       : dtString || "";
+//   }
+
+//   try {
+//     // ---------- LOAD BILL ----------
+//     const billRef = db.collection("bills").doc(id);
+//     const billSnap = await billRef.get();
+//     if (!billSnap.exists)
+//       return res.status(404).json({ error: "Bill not found" });
+//     const bill = billSnap.data();
+
+//     // fetch items (legacy/new combined)
+//     const itemsSnap = await db
+//       .collection("items")
+//       .where("billId", "==", id)
+//       .get();
+//     const legacyItems = itemsSnap.docs.map((d) => {
+//       const dd = d.data();
+//       return {
+//         id: d.id,
+//         description: dd.description || dd.item || dd.details || "",
+//         qty: Number(dd.qty || 0),
+//         rate: Number(dd.rate || 0),
+//         amount:
+//           dd.amount != null
+//             ? Number(dd.amount)
+//             : Number(dd.qty || 0) * Number(dd.rate || 0),
+//       };
+//     });
+
+//     const serviceItems = Array.isArray(bill.services)
+//       ? bill.services.map((s, idx) => {
+//           const qty = Number(s.qty || 0);
+//           const rate = Number(s.rate || 0);
+//           const amount = s.amount != null ? Number(s.amount) : qty * rate;
+//           const parts = [];
+//           if (s.item) parts.push(s.item);
+//           if (s.details) parts.push(s.details);
+//           return {
+//             id: `svc-${idx + 1}`,
+//             description: parts.join(" - "),
+//             qty,
+//             rate,
+//             amount,
+//           };
+//         })
+//       : [];
+//     const items = serviceItems.length > 0 ? serviceItems : legacyItems;
+
+//     // payments & refunds
+//     const paysSnap = await db
+//       .collection("payments")
+//       .where("billId", "==", id)
+//       .get();
+//     const payments = paysSnap.docs.map((d) => {
+//       const pd = d.data();
+//       return {
+//         id: d.id,
+//         paymentDateTime:
+//           pd.paymentDateTime ||
+//           (pd.paymentDate
+//             ? `${pd.paymentDate}T${pd.paymentTime || "00:00"}:00.000Z`
+//             : null),
+//         paymentDate: pd.paymentDate || null, // USER FILLED PAYMENT DATE
+//         paymentTime: pd.paymentTime || null,
+//         amount: Number(pd.amount || 0),
+//         mode: pd.mode || "",
+//         referenceNo: pd.referenceNo || "",
+//         chequeDate: pd.chequeDate || null,
+//         chequeNumber: pd.chequeNumber || null,
+//         bankName: pd.bankName || null,
+//         transferType: pd.transferType || null,
+//         transferDate: pd.transferDate || null,
+//         upiName: pd.upiName || null,
+//         upiId: pd.upiId || null,
+//         upiDate: pd.upiDate || null,
+//         drawnOn: pd.drawnOn || null,
+//         drawnAs: pd.drawnAs || null,
+//         receiptNo: pd.receiptNo || d.id,
+//       };
+//     });
+
+//     const refundsSnap = await db
+//       .collection("refunds")
+//       .where("billId", "==", id)
+//       .get();
+//     const refunds = refundsSnap.docs.map((d) => ({ id: d.id, ...d.data() }));
+
+//     // sort payments chronologically
+//     payments.sort((a, b) => {
+//       const da = a.paymentDateTime ? new Date(a.paymentDateTime) : new Date(0);
+//       const dbb = b.paymentDateTime ? new Date(b.paymentDateTime) : new Date(0);
+//       return da - dbb;
+//     });
+
+//     // totals
+//     const total = Number(
+//       bill.total || items.reduce((s, it) => s + Number(it.amount || 0), 0)
+//     );
+//     const totalPaidGross = payments.reduce(
+//       (s, p) => s + Number(p.amount || 0),
+//       0
+//     );
+//     const totalRefunded = refunds.reduce(
+//       (s, r) => s + Number(r.amount || 0),
+//       0
+//     );
+//     const netPaid = totalPaidGross - totalRefunded;
+//     const balance = total - netPaid;
+
+//     // Only allow full-payment PDF if balance is zero (or less)
+//     if (balance > 0) {
+//       return res.status(400).json({
+//         error:
+//           "Bill not fully paid - full payment PDF is available only after full payment",
+//       });
+//     }
+
+//     // ---------- FETCH CLINIC PROFILE ----------
+//     const profile = await getClinicProfile({ force: true });
+//     const clinicName = profileValue(profile, "clinicName");
+//     const clinicAddress = profileValue(profile, "address");
+//     const clinicPAN = profileValue(profile, "pan");
+//     const clinicRegNo = profileValue(profile, "regNo");
+//     const doctor1Name = profileValue(profile, "doctor1Name");
+//     const doctor1RegNo = profileValue(profile, "doctor1RegNo");
+//     const doctor2Name = profileValue(profile, "doctor2Name");
+//     const doctor2RegNo = profileValue(profile, "doctor2RegNo");
+//     const patientRepresentative = profileValue(
+//       profile,
+//       "patientRepresentative"
+//     );
+//     const clinicRepresentative = profileValue(profile, "clinicRepresentative");
+
+//     // --- PDF Setup ---
+//     res.setHeader("Content-Type", "application/pdf");
+//     res.setHeader(
+//       "Content-Disposition",
+//       `inline; filename="full-payment-${id}.pdf"`
+//     );
+
+//     const doc = new PDFDocument({ size: "A4", margin: 0 }); // we'll manage margins ourselves
+//     doc.pipe(res);
+
+//     const pageMargin = 15;
+//     const borderPadding = 20;
+
+//     function computeContentArea() {
+//       const pw = doc.page.width;
+//       const ph = doc.page.height;
+//       const contentLeft = pageMargin + borderPadding;
+//       const contentTop = pageMargin + borderPadding;
+//       const contentRight = pw - (pageMargin + borderPadding);
+//       const contentBottom = ph - (pageMargin + borderPadding);
+//       const usableWidth = contentRight - contentLeft;
+//       const usableHeight = contentBottom - contentTop;
+//       return {
+//         contentLeft,
+//         contentTop,
+//         contentRight,
+//         contentBottom,
+//         usableWidth,
+//         usableHeight,
+//       };
+//     }
+
+//     function drawPageBorder() {
+//       try {
+//         const pw = doc.page.width;
+//         const ph = doc.page.height;
+//         doc.save();
+//         doc.lineWidth(0.8);
+//         doc
+//           .rect(
+//             pageMargin,
+//             pageMargin,
+//             pw - pageMargin * 2,
+//             ph - pageMargin * 2
+//           )
+//           .stroke();
+//         doc.restore();
+//       } catch (e) {
+//         /* ignore */
+//       }
+//     }
+
+//     // fonts
+//     try {
+//       const workSansPath = path.join(
+//         __dirname,
+//         "resources",
+//         "WorkSans-Regular.ttf"
+//       );
+//       if (fs && fs.existsSync(workSansPath)) {
+//         doc.registerFont("WorkSans", workSansPath);
+//         doc.font("WorkSans");
+//       } else {
+//         doc.font("Helvetica");
+//       }
+//     } catch (e) {
+//       doc.font("Helvetica");
+//     }
+
+//     // initial
+//     drawPageBorder();
+//     let { contentLeft, contentTop, contentRight, usableWidth } =
+//       computeContentArea();
+//     let y = contentTop;
+
+//     const logoLeftPath = path.join(__dirname, "resources", "logo-left.png");
+//     const logoRightPath = path.join(__dirname, "resources", "logo-right.png");
+
+//     function drawPageHeader() {
+//       const ca = computeContentArea();
+//       contentLeft = ca.contentLeft;
+//       contentTop = ca.contentTop;
+//       contentRight = ca.contentRight;
+//       usableWidth = ca.usableWidth;
+
+//       const logoW = 40;
+//       const logoH = 40;
+//       try {
+//         if (fs && fs.existsSync(logoLeftPath))
+//           doc.image(logoLeftPath, contentLeft, y, {
+//             width: logoW,
+//             height: logoH,
+//           });
+//       } catch (e) {}
+//       try {
+//         if (fs && fs.existsSync(logoRightPath))
+//           doc.image(logoRightPath, contentRight - logoW, y, {
+//             width: logoW,
+//             height: logoH,
+//           });
+//       } catch (e) {}
+
+//       doc
+//         .fontSize(14)
+//         .font("Helvetica-Bold")
+//         .text(clinicName || "", contentLeft, y + 6, {
+//           width: usableWidth,
+//           align: "center",
+//         });
+//       doc
+//         .fontSize(9)
+//         .font("Helvetica")
+//         .text(clinicAddress || "", contentLeft, y + 26, {
+//           width: usableWidth,
+//           align: "center",
+//         });
+//       doc.text(
+//         `PAN : ${clinicPAN || ""}   |   Reg. No: ${clinicRegNo || ""}`,
+//         contentLeft,
+//         y + 40,
+//         { width: usableWidth, align: "center" }
+//       );
+
+//       y += 56;
+//       doc.moveTo(contentLeft, y).lineTo(contentRight, y).stroke();
+//       y += 8;
+//     }
+
+//     drawPageHeader();
+
+//     // --- doctors, invoice title, patient info ---
+//     doc.fontSize(9).font("Helvetica-Bold");
+//     doc.text(doctor1Name || "", contentLeft, y);
+//     doc.text(doctor2Name || "", contentLeft, y, {
+//       width: usableWidth,
+//       align: "right",
+//     });
+//     y += 12;
+//     doc.font("Helvetica").fontSize(8);
+//     doc.text(doctor1RegNo ? `Reg. No.: ${doctor1RegNo}` : "", contentLeft, y);
+//     doc.text(doctor2RegNo ? `Reg. No.: ${doctor2RegNo}` : "", contentLeft, y, {
+//       width: usableWidth,
+//       align: "right",
+//     });
+//     y += 18;
+
+//     doc
+//       .fontSize(10)
+//       .font("Helvetica-Bold")
+//       .rect(contentLeft, y, usableWidth, 18)
+//       .stroke();
+//     doc.text("INVOICE CUM PAYMENT RECEIPT", contentLeft, y + 4, {
+//       width: usableWidth,
+//       align: "center",
+//     });
+//     y += 28;
+
+//     const invoiceNo = bill.invoiceNo || id;
+//     const dateText = formatDateOnly(bill.date || "");
+//     doc.fontSize(9).font("Helvetica-Bold");
+//     doc.text(`Invoice No.: ${invoiceNo}`, contentLeft, y);
+//     doc.text(`Date: ${dateText}`, contentLeft, y, {
+//       width: usableWidth,
+//       align: "right",
+//     });
+//     y += 14;
+
+//     // Patient info (age & sex printed only when present)
+//     const patientName = bill.patientName || "";
+//     const sexText = bill.sex ? String(bill.sex) : "";
+//     const ageText =
+//       bill.age != null && bill.age !== "" ? `${bill.age} Years` : "";
+//     const addressText = bill.address || "";
+//     const procedureText = bill.procedureDone || "";
+
+//     doc
+//       .font("Helvetica-Bold")
+//       .text(`Patient Name: ${patientName}`, contentLeft, y);
+//     if (ageText)
+//       // doc.font("Helvetica").text(`Age: ${ageText}`, contentLeft, y, {
+//       //   width: usableWidth,
+//       //   align: "right",
+//       // });
+//     y += 14;
+
+//     doc.font("Helvetica");
+//     if (sexText) {
+//       doc.text(
+//         `Address: ${addressText || "____________________"}`,
+//         contentLeft,
+//         y,
+//         {
+//           width: usableWidth * 0.6,
+//         }
+//       );
+//       // doc.text(`Sex: ${sexText}`, contentLeft, y, {
+//       //   width: usableWidth,
+//       //   align: "right",
+//       // });
+//       y += 20;
+//     } else {
+//       doc.text(
+//         `Address: ${addressText || "____________________"}`,
+//         contentLeft,
+//         y,
+//         {
+//           width: usableWidth,
+//         }
+//       );
+//       y += 20;
+//     }
+
+//     // ---------- ADD "Procedure Done" heading just before items table ----------
+
+//     doc
+//       .fontSize(9)
+//       .font("Helvetica")
+//       .text(
+//         `Procedure Done :- ${procedureText || "____________________"}`,
+//         contentLeft,
+//         y
+//       );
+
+//     y += 14;
+
+//     // ---------- SERVICES / ITEMS TABLE ----------
+//     const tableLeft = contentLeft;
+//     const colSrW = 24;
+//     const colQtyW = 48;
+//     const colRateW = 70;
+//     const colSubW = 80;
+//     const colServiceW = usableWidth - (colSrW + colQtyW + colRateW + colSubW);
+//     const colSrX = tableLeft;
+//     const colServiceX = colSrX + colSrW;
+//     const colQtyX = colServiceX + colServiceW;
+//     const colRateX = colQtyX + colQtyW;
+//     const colSubX = colRateX + colRateW;
+//     const tableRightX = tableLeft + usableWidth;
+
+//     const headerHeight = 14;
+//     const headerPadding = 2;
+//     const headerDrawH = headerHeight + headerPadding * 2;
+//     const minRowH = 12;
+//     const minTableHeight = 180;
+//     const bottomSafety = 100;
+
+//     function drawVerticalsForItemsBlock(yTop, height) {
+//       const xs = [colSrX, colServiceX, colQtyX, colRateX, colSubX, tableRightX];
+//       xs.forEach((x) => {
+//         doc
+//           .moveTo(x, yTop)
+//           .lineTo(x, yTop + height)
+//           .stroke();
+//       });
+//     }
+
+//     let tableStartY = y;
+
+//     // header background + text
+//     doc
+//       .save()
+//       .rect(tableLeft, y, usableWidth, headerDrawH)
+//       .fill("#F3F3F3")
+//       .restore();
+//     doc.font("Helvetica-Bold").fontSize(9);
+//     const headerTextYOffset = headerPadding + 3;
+//     doc.text("Sr.", colSrX + 4, y + headerTextYOffset);
+//     doc.text(
+//       "Description of Items / Services",
+//       colServiceX + 4,
+//       y + headerTextYOffset,
+//       { width: colServiceW - 8 }
+//     );
+//     doc.text("Qty", colQtyX + 4, y + headerTextYOffset);
+//     doc.text("Rate", colRateX + 4, y + headerTextYOffset, {
+//       width: colRateW - 8,
+//       align: "right",
+//     });
+//     doc.text("Amount", colSubX + 4, y + headerTextYOffset, {
+//       width: colSubW - 8,
+//       align: "right",
+//     });
+
+//     y += headerDrawH;
+//     doc.moveTo(tableLeft, y).lineTo(tableRightX, y).stroke();
+
+//     // render items
+//     doc.font("Helvetica").fontSize(9);
+//     let filledHeight = 0;
+//     for (let i = 0; i < items.length; i++) {
+//       const it = items[i];
+
+//       const descH = doc.heightOfString(it.description || "", {
+//         width: colServiceW - 8,
+//       });
+//       const qtyH = doc.heightOfString(String(it.qty || ""), {
+//         width: colQtyW - 8,
+//       });
+//       const rateH = doc.heightOfString(formatMoney(it.rate || 0), {
+//         width: colRateW - 8,
+//       });
+//       const amtH = doc.heightOfString(formatMoney(it.amount || 0), {
+//         width: colSubW - 8,
+//       });
+
+//       const contentMaxH = Math.max(descH, qtyH, rateH, amtH);
+//       const thisRowH = Math.max(minRowH, contentMaxH + 6);
+
+//       // page-break check
+//       if (y + thisRowH > doc.page.height - bottomSafety) {
+//         const visualHeightSoFar = headerDrawH + filledHeight;
+//         if (visualHeightSoFar > 0) {
+//           drawVerticalsForItemsBlock(tableStartY, visualHeightSoFar);
+//           doc
+//             .rect(tableLeft, tableStartY, usableWidth, visualHeightSoFar)
+//             .stroke();
+//         }
+
+//         doc.addPage();
+//         // after addPage, draw border and header for the new page and reset content area
+//         drawPageBorder();
+//         ({ contentLeft, contentTop, contentRight, usableWidth } =
+//           computeContentArea());
+//         y = contentTop;
+
+//         // redraw page header
+//         drawPageHeader();
+
+//         // re-render invoice title on new page
+//         doc
+//           .fontSize(10)
+//           .font("Helvetica-Bold")
+//           .rect(contentLeft, y, usableWidth, 18)
+//           .stroke();
+//         doc.text("INVOICE CUM PAYMENT RECEIPT", contentLeft, y + 4, {
+//           width: usableWidth,
+//           align: "center",
+//         });
+//         y += 28;
+
+//         // redraw table header for this new page
+//         tableStartY = y;
+//         doc
+//           .save()
+//           .rect(tableLeft, y, usableWidth, headerDrawH)
+//           .fill("#F3F3F3")
+//           .restore();
+//         doc.font("Helvetica-Bold").fontSize(9);
+//         doc.text("Sr.", colSrX + 4, y + headerTextYOffset);
+//         doc.text(
+//           "Description of Items / Services",
+//           colServiceX + 4,
+//           y + headerTextYOffset,
+//           { width: colServiceW - 8 }
+//         );
+//         doc.text("Qty", colQtyX + 4, y + headerTextYOffset);
+//         doc.text("Rate", colRateX + 4, y + headerTextYOffset, {
+//           width: colRateW - 8,
+//           align: "right",
+//         });
+//         doc.text("Amount", colSubX + 4, y + headerTextYOffset, {
+//           width: colSubW - 8,
+//           align: "right",
+//         });
+//         y += headerDrawH;
+//         doc.moveTo(tableLeft, y).lineTo(tableRightX, y).stroke();
+
+//         filledHeight = 0;
+//       }
+
+//       // draw row text
+//       const descH2 = doc.heightOfString(it.description || "", {
+//         width: colServiceW - 8,
+//       });
+//       const qtyH2 = doc.heightOfString(String(it.qty || ""), {
+//         width: colQtyW - 8,
+//       });
+//       const rateH2 = doc.heightOfString(formatMoney(it.rate || 0), {
+//         width: colRateW - 8,
+//       });
+//       const amtH2 = doc.heightOfString(formatMoney(it.amount || 0), {
+//         width: colSubW - 8,
+//       });
+//       const actualRowH = Math.max(
+//         minRowH,
+//         Math.max(descH2, qtyH2, rateH2, amtH2) + 6
+//       );
+
+//       const rowTop = y;
+//       const descY = rowTop + (actualRowH - descH2) / 2;
+//       const qtyY = rowTop + (actualRowH - qtyH2) / 2;
+//       const rateY = rowTop + (actualRowH - rateH2) / 2;
+//       const amtY = rowTop + (actualRowH - amtH2) / 2;
+
+//       doc.text(String(i + 1), colSrX + 4, rowTop + 3);
+//       doc.text(it.description || "", colServiceX + 4, descY, {
+//         width: colServiceW - 8,
+//       });
+//       doc.text(
+//         String(it.qty != null && it.qty !== "" ? it.qty : ""),
+//         colQtyX + 4,
+//         qtyY,
+//         { width: colQtyW - 8, align: "left" }
+//       );
+//       doc.text(formatMoney(it.rate || 0), colRateX + 4, rateY, {
+//         width: colRateW - 8,
+//         align: "right",
+//       });
+//       doc.text(formatMoney(it.amount || 0), colSubX + 4, amtY, {
+//         width: colSubW - 8,
+//         align: "right",
+//       });
+
+//       y += actualRowH;
+//       filledHeight += actualRowH;
+//     }
+
+//     // ensure minimum visual height of the items block (filler rows)
+//     let totalTableHeight = filledHeight;
+//     if (totalTableHeight < minTableHeight) {
+//       let needed = minTableHeight - totalTableHeight;
+//       const fillerRows = Math.ceil(needed / minRowH);
+//       for (let fr = 0; fr < fillerRows; fr++) {
+//         if (y + minRowH > doc.page.height - bottomSafety) {
+//           drawVerticalsForItemsBlock(
+//             tableStartY,
+//             headerDrawH + totalTableHeight
+//           );
+//           doc
+//             .rect(
+//               tableLeft,
+//               tableStartY,
+//               usableWidth,
+//               headerDrawH + totalTableHeight
+//             )
+//             .stroke();
+
+//           doc.addPage();
+//           drawPageBorder();
+//           ({ contentLeft, contentTop, contentRight, usableWidth } =
+//             computeContentArea());
+//           y = contentTop;
+
+//           // redraw page header + invoice title
+//           drawPageHeader();
+//           doc
+//             .fontSize(10)
+//             .font("Helvetica-Bold")
+//             .rect(contentLeft, y, usableWidth, 18)
+//             .stroke();
+//           doc.text("INVOICE CUM PAYMENT RECEIPT", contentLeft, y + 4, {
+//             width: usableWidth,
+//             align: "center",
+//           });
+//           y += 28;
+
+//           // render header again, reset trackers
+//           tableStartY = y;
+//           doc
+//             .save()
+//             .rect(tableLeft, y, usableWidth, headerDrawH)
+//             .fill("#F3F3F3")
+//             .restore();
+//           doc.font("Helvetica-Bold").fontSize(9);
+//           doc.text("Sr.", colSrX + 4, y + headerTextYOffset);
+//           doc.text(
+//             "Description of Items / Services",
+//             colServiceX + 4,
+//             y + headerTextYOffset,
+//             { width: colServiceW - 8 }
+//           );
+//           doc.text("Qty", colQtyX + 4, y + headerTextYOffset);
+//           doc.text("Rate", colRateX + 4, y + headerTextYOffset, {
+//             width: colRateW - 8,
+//             align: "right",
+//           });
+//           doc.text("Amount", colSubX + 4, y + headerTextYOffset, {
+//             width: colSubW - 8,
+//             align: "right",
+//           });
+//           y += headerDrawH;
+//           doc.moveTo(tableLeft, y).lineTo(tableRightX, y).stroke();
+
+//           totalTableHeight = 0;
+//         }
+
+//         y += minRowH;
+//         totalTableHeight += minRowH;
+//       }
+//       filledHeight = totalTableHeight;
+//     }
+
+//     // draw vertical separators spanning header + content
+//     const visualTableHeight = headerDrawH + filledHeight;
+//     drawVerticalsForItemsBlock(tableStartY, visualTableHeight);
+//     doc.rect(tableLeft, tableStartY, usableWidth, visualTableHeight).stroke();
+
+//     // ===== Net Paid box after items =====
+//     const netBoxW = 120;
+//     const netBoxH = 28;
+//     const netBoxX = tableRightX - netBoxW;
+//     let netBoxY = tableStartY + visualTableHeight;
+
+//     if (netBoxY + netBoxH + 60 > doc.page.height) {
+//       doc.addPage();
+//       drawPageBorder();
+//       ({ contentLeft, contentTop, contentRight, usableWidth } =
+//         computeContentArea());
+//       y = contentTop;
+//       drawPageHeader();
+//       netBoxY = contentTop + 54;
+//     }
+
+//     doc.rect(netBoxX, netBoxY, netBoxW, netBoxH).stroke();
+//     doc
+//       .font("Helvetica-Bold")
+//       .fontSize(9)
+//       .text("Total", netBoxX + 6, netBoxY + 6, {
+//         width: netBoxW - 12,
+//         align: "left",
+//       });
+//     doc
+//       .font("Helvetica")
+//       .fontSize(9)
+//       .text(`Rs ${formatMoney(netPaid)}`, netBoxX + 6, netBoxY + 6, {
+//         width: netBoxW - 12,
+//         align: "right",
+//       });
+
+//     if (netBoxY === tableStartY + visualTableHeight) {
+//       y = netBoxY + netBoxH + 8;
+//     } else {
+//       y = netBoxY + netBoxH + 12;
+//     }
+
+//     // ---------- PAYMENT DETAILS HEADING ----------
+//     doc.moveDown(0.2);
+//     doc
+//       .fontSize(10)
+//       .font("Helvetica-Bold")
+//       .text("Payment Details", contentLeft, y);
+//     y += 16;
+
+//     // ---------- PAYMENT DETAILS TABLE ----------
+//     const pTableLeft = contentLeft;
+//     const pColDateW = 70; // ab: Payment Date (user entered)
+//     const pColPaymentDateW = 70; // ab: Transfer Date (cheque/transfer/upi)
+//     const pColRecW = 100;
+//     const pColModeW = 50;
+//     const pColBankW = 70;
+//     const pColRefW = 120;
+//     const pColAmtW =
+//       usableWidth -
+//       (pColDateW +
+//         pColPaymentDateW +
+//         pColRecW +
+//         pColModeW +
+//         pColBankW +
+//         pColRefW);
+
+//     const pColDateX = pTableLeft;
+//     const pColPaymentDateX = pColDateX + pColDateW;
+//     const pColRecX = pColPaymentDateX + pColPaymentDateW;
+//     const pColModeX = pColRecX + pColRecW;
+//     const pColBankX = pColModeX + pColModeW;
+//     const pColRefX = pColBankX + pColBankW;
+//     const pColAmtX = pColRefX + pColRefW;
+//     const pTableRightX = pTableLeft + usableWidth;
+
+//     const pHeaderH = 14;
+//     const pHeaderDrawH = pHeaderH + headerPadding * 2;
+//     const pMinRowH = 12;
+//     const pMinTableH = 90;
+//     const pBottomSafety = 100;
+
+//     function drawVerticalsForPaymentsBlock(yTop, height) {
+//       const xs = [
+//         pColDateX,
+//         pColPaymentDateX,
+//         pColRecX,
+//         pColModeX,
+//         pColBankX,
+//         pColRefX,
+//         pColAmtX,
+//         pTableRightX,
+//       ];
+//       xs.forEach((x) => {
+//         doc
+//           .moveTo(x, yTop)
+//           .lineTo(x, yTop + height)
+//           .stroke();
+//       });
+//     }
+
+//     // payments table header placement
+//     let pTableStartY = y;
+//     doc
+//       .save()
+//       .rect(pTableLeft, y, usableWidth, pHeaderDrawH)
+//       .fill("#F3F3F3")
+//       .restore();
+//     doc.font("Helvetica-Bold").fontSize(9);
+//     const pHeaderTextYOffset = headerPadding + 3;
+
+//     // HEADER TEXT CHANGE:
+//     doc.text("Date", pColDateX + 4, y + pHeaderTextYOffset, {
+//       width: pColDateW - 8,
+//     });
+//     doc.text("Payment Date", pColPaymentDateX + 4, y + pHeaderTextYOffset, {
+//       width: pColPaymentDateW - 8,
+//     });
+//     doc.text("Receipt No.", pColRecX + 4, y + pHeaderTextYOffset, {
+//       width: pColRecW - 8,
+//     });
+//     doc.text("Mode", pColModeX + 4, y + pHeaderTextYOffset, {
+//       width: pColModeW - 8,
+//     });
+//     doc.text("Bank Name", pColBankX + 4, y + pHeaderTextYOffset, {
+//       width: pColBankW - 8,
+//     });
+//     doc.text("Reference / Cheque No.", pColRefX + 4, y + pHeaderTextYOffset, {
+//       width: pColRefW - 8,
+//     });
+//     doc.text("Amount", pColAmtX + 4, y + pHeaderTextYOffset, {
+//       width: pColAmtW - 8,
+//       align: "right",
+//     });
+
+//     y += pHeaderDrawH;
+//     doc.moveTo(pTableLeft, y).lineTo(pTableRightX, y).stroke();
+
+//     // render payments rows
+//     doc.font("Helvetica").fontSize(9);
+//     let pFilledHeight = 0;
+//     for (let i = 0; i < payments.length; i++) {
+//       const p = payments[i];
+
+//       // 1) USER FILLED PAYMENT DATE (first column)
+//       const paymentDateText = formatDateOnly(p.paymentDate || "");
+
+//       // 2) TRANSFER DATE COLUMN (second column) BASED ON MODE
+//       let transferDateText = "";
+//       if (p.mode === "Cheque") {
+//         transferDateText = formatDateOnly(p.chequeDate);
+//       } else if (p.mode === "BankTransfer") {
+//         transferDateText = formatDateOnly(p.transferDate);
+//       } else if (p.mode === "UPI") {
+//         transferDateText = formatDateOnly(p.upiDate);
+//       } else {
+//         transferDateText = "";
+//       }
+
+//       const receiptText = p.receiptNo || p.id || "";
+//       let modeText = p.mode || "-";
+//       if (
+//         (modeText === "BankTransfer" ||
+//           (modeText && modeText.toLowerCase().includes("bank"))) &&
+//         p.transferType
+//       ) {
+//         modeText = `Bank (${p.transferType})`;
+//       }
+//       let bankText = "-";
+//       let refText = "-";
+
+//       if (p.mode === "Cheque") {
+//         // Cheque → Reference column me Cheque No.
+//         refText = p.chequeNumber || p.referenceNo || "-";
+//         bankText = p.bankName || "-";
+//       } else if (p.mode === "UPI") {
+//         // UPI → Bank Name column me UPI ID
+//         bankText = p.upiId || "-";
+//         refText = p.referenceNo || "-";
+//       } else {
+//         // Cash / BankTransfer default
+//         bankText = p.bankName || "-";
+//         refText = p.referenceNo || "-";
+//       }
+
+//       const amtText = formatMoney(p.amount || 0);
+
+//       // compute heights
+//       const dH = doc.heightOfString(paymentDateText, { width: pColDateW - 8 });
+//       const pdH = doc.heightOfString(transferDateText, {
+//         width: pColPaymentDateW - 8,
+//       });
+//       const rH = doc.heightOfString(receiptText, {
+//         width: pColRecW - 8,
+//       });
+//       const mH = doc.heightOfString(modeText, {
+//         width: pColModeW - 8,
+//       });
+//       const bH = doc.heightOfString(bankText, {
+//         width: pColBankW - 8,
+//       });
+//       const refH = doc.heightOfString(refText, {
+//         width: pColRefW - 8,
+//       });
+//       const aH = doc.heightOfString(amtText, {
+//         width: pColAmtW - 8,
+//       });
+
+//       const maxH = Math.max(dH, pdH, rH, mH, bH, refH, aH);
+//       const thisRowH = Math.max(pMinRowH, maxH + 6);
+
+//       // page-break check
+//       if (y + thisRowH > doc.page.height - pBottomSafety) {
+//         const paymentsVisualHeightSoFar = pHeaderDrawH + pFilledHeight;
+//         if (paymentsVisualHeightSoFar > 0) {
+//           drawVerticalsForPaymentsBlock(
+//             pTableStartY,
+//             paymentsVisualHeightSoFar
+//           );
+//           doc
+//             .rect(
+//               pTableLeft,
+//               pTableStartY,
+//               usableWidth,
+//               paymentsVisualHeightSoFar
+//             )
+//             .stroke();
+//         }
+
+//         doc.addPage();
+//         drawPageBorder();
+//         ({ contentLeft, contentTop, contentRight, usableWidth } =
+//           computeContentArea());
+//         y = contentTop;
+
+//         // redraw header area/context
+//         drawPageHeader();
+
+//         // payments header on new page
+//         pTableStartY = y;
+//         doc
+//           .save()
+//           .rect(pTableLeft, y, usableWidth, pHeaderDrawH)
+//           .fill("#F3F3F3")
+//           .restore();
+//         doc.font("Helvetica-Bold").fontSize(9);
+//         doc.text("Date", pColDateX + 4, y + pHeaderTextYOffset, {
+//           width: pColDateW - 8,
+//         });
+//         doc.text("Payment Date", pColPaymentDateX + 4, y + pHeaderTextYOffset, {
+//           width: pColPaymentDateW - 8,
+//         });
+//         doc.text("Receipt No.", pColRecX + 4, y + pHeaderTextYOffset, {
+//           width: pColRecW - 8,
+//         });
+//         doc.text("Mode", pColModeX + 4, y + pHeaderTextYOffset, {
+//           width: pColModeW - 8,
+//         });
+//         doc.text("Bank Name", pColBankX + 4, y + pHeaderTextYOffset, {
+//           width: pColBankW - 8,
+//         });
+//         doc.text("Reference", pColRefX + 4, y + pHeaderTextYOffset, {
+//           width: pColRefW - 8,
+//         });
+//         doc.text("Amount", pColAmtX + 4, y + pHeaderTextYOffset, {
+//           width: pColAmtW - 8,
+//           align: "right",
+//         });
+//         y += pHeaderDrawH;
+//         doc.moveTo(pTableLeft, y).lineTo(pTableRightX, y).stroke();
+
+//         pFilledHeight = 0;
+//       }
+
+//       // draw cells
+//       const rowTop = y;
+//       const dateY = rowTop + (thisRowH - dH) / 2;
+//       const pdY = rowTop + (thisRowH - pdH) / 2;
+//       const recY = rowTop + (thisRowH - rH) / 2;
+//       const modeY = rowTop + (thisRowH - mH) / 2;
+//       const bankY = rowTop + (thisRowH - bH) / 2;
+//       const refY = rowTop + (thisRowH - refH) / 2;
+//       const amtY = rowTop + (thisRowH - aH) / 2;
+
+//       doc.text(paymentDateText, pColDateX + 4, dateY, {
+//         width: pColDateW - 8,
+//       });
+//       doc.text(transferDateText, pColPaymentDateX + 4, pdY, {
+//         width: pColPaymentDateW - 8,
+//       });
+//       doc.text(receiptText, pColRecX + 4, recY, {
+//         width: pColRecW - 8,
+//       });
+//       doc.text(modeText, pColModeX + 4, modeY, {
+//         width: pColModeW - 8,
+//       });
+//       doc.text(bankText, pColBankX + 4, bankY, {
+//         width: pColBankW - 8,
+//       });
+//       doc.text(refText, pColRefX + 4, refY, {
+//         width: pColRefW - 8,
+//       });
+//       doc.text(amtText, pColAmtX + 4, amtY, {
+//         width: pColAmtW - 8,
+//         align: "right",
+//       });
+
+//       y += thisRowH;
+//       pFilledHeight += thisRowH;
+//     }
+
+//     // ensure payments block minimum visual height (filler rows)
+//     if (pFilledHeight < pMinTableH) {
+//       const need = pMinTableH - pFilledHeight;
+//       const fillerCount = Math.ceil(need / pMinRowH);
+//       for (let f = 0; f < fillerCount; f++) {
+//         if (y + pMinRowH > doc.page.height - pBottomSafety) {
+//           const paymentsVisualHeightSoFar = pHeaderDrawH + pFilledHeight;
+//           if (paymentsVisualHeightSoFar > 0) {
+//             drawVerticalsForPaymentsBlock(
+//               pTableStartY,
+//               paymentsVisualHeightSoFar
+//             );
+//             doc
+//               .rect(
+//                 pTableLeft,
+//                 pTableStartY,
+//                 usableWidth,
+//                 paymentsVisualHeightSoFar
+//               )
+//               .stroke();
+//           }
+//           doc.addPage();
+//           drawPageBorder();
+//           ({ contentLeft, contentTop, contentRight, usableWidth } =
+//             computeContentArea());
+//           y = contentTop;
+
+//           // redraw page header and payments header
+//           drawPageHeader();
+//           pTableStartY = y;
+//           doc
+//             .save()
+//             .rect(pTableLeft, y, usableWidth, pHeaderDrawH)
+//             .fill("#F3F3F3")
+//             .restore();
+//           doc.font("Helvetica-Bold").fontSize(9);
+//           doc.text("Date", pColDateX + 4, y + pHeaderTextYOffset, {
+//             width: pColDateW - 8,
+//           });
+//           doc.text(
+//             "Payment Date",
+//             pColPaymentDateX + 4,
+//             y + pHeaderTextYOffset,
+//             { width: pColPaymentDateW - 8 }
+//           );
+//           doc.text("Receipt No.", pColRecX + 4, y + pHeaderTextYOffset, {
+//             width: pColRecW - 8,
+//           });
+//           doc.text("Mode", pColModeX + 4, y + pHeaderTextYOffset, {
+//             width: pColModeW - 8,
+//           });
+//           doc.text("Bank Name", pColBankX + 4, y + pHeaderTextYOffset, {
+//             width: pColBankW - 8,
+//           });
+//           doc.text("Reference", pColRefX + 4, y + pHeaderTextYOffset, {
+//             width: pColRefW - 8,
+//           });
+//           doc.text("Amount", pColAmtX + 4, y + pHeaderTextYOffset, {
+//             width: pColAmtW - 8,
+//             align: "right",
+//           });
+//           y += pHeaderDrawH;
+//           doc.moveTo(pTableLeft, y).lineTo(pTableRightX, y).stroke();
+
+//           pFilledHeight = 0;
+//         }
+
+//         y += pMinRowH;
+//         pFilledHeight += pMinRowH;
+//       }
+//     }
+
+//     // finalize payments block visuals
+//     if (pFilledHeight > 0) {
+//       const paymentsVisualHeight = pHeaderDrawH + pFilledHeight;
+//       drawVerticalsForPaymentsBlock(pTableStartY, paymentsVisualHeight);
+//       doc
+//         .rect(pTableLeft, pTableStartY, usableWidth, paymentsVisualHeight)
+//         .stroke();
+//       // set y just after payments table
+//       y = pTableStartY + paymentsVisualHeight + 12;
+//     }
+
+//     // ---------- NOTE + TOTALS BOX ----------
+//     const boxWidth2 = 200; // totals box width
+//     const noteText =
+//       "* This receipt is generated by the Madhurekha Eye Care Centre. Disputes if any is subjected to Jamshedpur jurisdiction.";
+
+//     const spaceForNote = usableWidth - boxWidth2 - 12;
+//     const noteWidth = Math.max(120, Math.min(spaceForNote, usableWidth - 12));
+
+//     doc
+//       .fontSize(8)
+//       .font("Helvetica")
+//       .text(noteText, contentLeft, y, { width: noteWidth });
+
+//     const boxX2 = contentRight - boxWidth2;
+//     const boxY2 = y;
+
+//     const lineH = 14;
+//     const rowsCount = 4;
+//     const boxHeight2 = rowsCount * lineH + 8;
+
+//     if (boxY2 + boxHeight2 + 60 > doc.page.height) {
+//       doc.addPage();
+//       drawPageBorder();
+//       ({ contentLeft, contentTop, contentRight, usableWidth } =
+//         computeContentArea());
+//       y = contentTop;
+//       drawPageHeader();
+//       doc
+//         .fontSize(8)
+//         .font("Helvetica")
+//         .text(noteText, contentLeft, y, {
+//           width: Math.max(120, usableWidth - boxWidth2 - 12),
+//         });
+//     }
+
+//     doc.rect(boxX2, boxY2, boxWidth2, boxHeight2).stroke();
+//     let by = boxY2 + 6;
+//     doc.font("Helvetica").fontSize(9);
+//     const addRow = (label, value) => {
+//       doc.text(label, boxX2 + 6, by);
+//       doc.text(`Rs ${formatMoney(value)}`, boxX2 + 6, by, {
+//         width: boxWidth2 - 12,
+//         align: "right",
+//       });
+//       by += lineH;
+//     };
+
+//     addRow("Total", total);
+//     addRow("Total Paid (gross)", totalPaidGross);
+//     addRow("Total Refunded", totalRefunded);
+//     addRow("Balance", balance);
+
+//     y = Math.max(boxY2 + boxHeight2 + 20, y + 20);
+
+//     // ---------- SIGNATURES ----------
+//     const rightSigX = contentRight - 160;
+//     doc
+//       .moveTo(rightSigX, y + 28)
+//       .lineTo(rightSigX + 160, y + 28)
+//       .dash(1, { space: 2 })
+//       .stroke()
+//       .undash();
+//     doc.fontSize(8).text(clinicRepresentative || "", rightSigX, y + 32, {
+//       width: 160,
+//       align: "center",
+//     });
+
+//     doc.end();
+//   } catch (err) {
+//     console.error("full-payment-pdf error:", err);
+//     if (!res.headersSent) {
+//       res.status(500).json({ error: "Failed to generate full payment PDF" });
+//     } else {
+//       try {
+//         res.end();
+//       } catch (e) {}
+//     }
+//   }
+// });
+
 app.get("/api/bills/:id/full-payment-pdf", async (req, res) => {
   const id = req.params.id;
   if (!id) return res.status(400).json({ error: "Invalid bill id" });
@@ -3778,7 +4908,7 @@ app.get("/api/bills/:id/full-payment-pdf", async (req, res) => {
           (pd.paymentDate
             ? `${pd.paymentDate}T${pd.paymentTime || "00:00"}:00.000Z`
             : null),
-        paymentDate: pd.paymentDate || null, // USER FILLED PAYMENT DATE
+        paymentDate: pd.paymentDate || null,
         paymentTime: pd.paymentTime || null,
         amount: Number(pd.amount || 0),
         mode: pd.mode || "",
@@ -3856,7 +4986,7 @@ app.get("/api/bills/:id/full-payment-pdf", async (req, res) => {
       `inline; filename="full-payment-${id}.pdf"`
     );
 
-    const doc = new PDFDocument({ size: "A4", margin: 0 }); // we'll manage margins ourselves
+    const doc = new PDFDocument({ size: "A4", margin: 0 });
     doc.pipe(res);
 
     const pageMargin = 15;
@@ -4008,7 +5138,7 @@ app.get("/api/bills/:id/full-payment-pdf", async (req, res) => {
 
     const invoiceNo = bill.invoiceNo || id;
     const dateText = formatDateOnly(bill.date || "");
-    doc.fontSize(9).font("Helvetica");
+    doc.fontSize(9).font("Helvetica-Bold");
     doc.text(`Invoice No.: ${invoiceNo}`, contentLeft, y);
     doc.text(`Date: ${dateText}`, contentLeft, y, {
       width: usableWidth,
@@ -4016,21 +5146,18 @@ app.get("/api/bills/:id/full-payment-pdf", async (req, res) => {
     });
     y += 14;
 
-    // Patient info (age & sex printed only when present)
+    // Patient info
     const patientName = bill.patientName || "";
     const sexText = bill.sex ? String(bill.sex) : "";
     const ageText =
       bill.age != null && bill.age !== "" ? `${bill.age} Years` : "";
     const addressText = bill.address || "";
+    const procedureText = bill.procedureDone || "";
 
     doc
       .font("Helvetica-Bold")
       .text(`Patient Name: ${patientName}`, contentLeft, y);
-    if (ageText)
-      doc.font("Helvetica").text(`Age: ${ageText}`, contentLeft, y, {
-        width: usableWidth,
-        align: "right",
-      });
+    // Age/Sex commented in original
     y += 14;
 
     doc.font("Helvetica");
@@ -4043,10 +5170,6 @@ app.get("/api/bills/:id/full-payment-pdf", async (req, res) => {
           width: usableWidth * 0.6,
         }
       );
-      doc.text(`Sex: ${sexText}`, contentLeft, y, {
-        width: usableWidth,
-        align: "right",
-      });
       y += 20;
     } else {
       doc.text(
@@ -4060,12 +5183,17 @@ app.get("/api/bills/:id/full-payment-pdf", async (req, res) => {
       y += 20;
     }
 
-    // ---------- ADD "Procedure Done" heading just before items table ----------
+    // Procedure Done
     doc
-      .fontSize(10)
-      .font("Helvetica-Bold")
-      .text("Procedure Done", contentLeft, y);
-    y += 16;
+      .fontSize(9)
+      .font("Helvetica")
+      .text(
+        `Procedure Done :- ${procedureText || "____________________"}`,
+        contentLeft,
+        y
+      );
+
+    y += 14;
 
     // ---------- SERVICES / ITEMS TABLE ----------
     const tableLeft = contentLeft;
@@ -4385,25 +5513,23 @@ app.get("/api/bills/:id/full-payment-pdf", async (req, res) => {
       .text("Payment Details", contentLeft, y);
     y += 16;
 
-    // ---------- PAYMENT DETAILS TABLE ----------
+    // ---------- PAYMENT DETAILS TABLE (Date column removed) ----------
     const pTableLeft = contentLeft;
-    const pColDateW = 70; // ab: Payment Date (user entered)
-    const pColPaymentDateW = 70; // ab: Transfer Date (cheque/transfer/upi)
+
+    const pColPaymentDateW = 70;
     const pColRecW = 100;
-    const pColModeW = 50;
-    const pColBankW = 70;
-    const pColRefW = 120;
+    const pColModeW = 60;
+    const pColBankW = 100;
+    const pColRefW = 130;
     const pColAmtW =
       usableWidth -
-      (pColDateW +
-        pColPaymentDateW +
+      (pColPaymentDateW +
         pColRecW +
         pColModeW +
         pColBankW +
         pColRefW);
 
-    const pColDateX = pTableLeft;
-    const pColPaymentDateX = pColDateX + pColDateW;
+    const pColPaymentDateX = pTableLeft;
     const pColRecX = pColPaymentDateX + pColPaymentDateW;
     const pColModeX = pColRecX + pColRecW;
     const pColBankX = pColModeX + pColModeW;
@@ -4419,7 +5545,6 @@ app.get("/api/bills/:id/full-payment-pdf", async (req, res) => {
 
     function drawVerticalsForPaymentsBlock(yTop, height) {
       const xs = [
-        pColDateX,
         pColPaymentDateX,
         pColRecX,
         pColModeX,
@@ -4446,10 +5571,6 @@ app.get("/api/bills/:id/full-payment-pdf", async (req, res) => {
     doc.font("Helvetica-Bold").fontSize(9);
     const pHeaderTextYOffset = headerPadding + 3;
 
-    // HEADER TEXT CHANGE:
-    doc.text("Date", pColDateX + 4, y + pHeaderTextYOffset, {
-      width: pColDateW - 8,
-    });
     doc.text("Payment Date", pColPaymentDateX + 4, y + pHeaderTextYOffset, {
       width: pColPaymentDateW - 8,
     });
@@ -4459,7 +5580,7 @@ app.get("/api/bills/:id/full-payment-pdf", async (req, res) => {
     doc.text("Mode", pColModeX + 4, y + pHeaderTextYOffset, {
       width: pColModeW - 8,
     });
-    doc.text("Bank Name", pColBankX + 4, y + pHeaderTextYOffset, {
+    doc.text("Bank Name / UPI ID", pColBankX + 4, y + pHeaderTextYOffset, {
       width: pColBankW - 8,
     });
     doc.text("Reference / Cheque No.", pColRefX + 4, y + pHeaderTextYOffset, {
@@ -4479,10 +5600,8 @@ app.get("/api/bills/:id/full-payment-pdf", async (req, res) => {
     for (let i = 0; i < payments.length; i++) {
       const p = payments[i];
 
-      // 1) USER FILLED PAYMENT DATE (first column)
       const paymentDateText = formatDateOnly(p.paymentDate || "");
 
-      // 2) TRANSFER DATE COLUMN (second column) BASED ON MODE
       let transferDateText = "";
       if (p.mode === "Cheque") {
         transferDateText = formatDateOnly(p.chequeDate);
@@ -4507,24 +5626,19 @@ app.get("/api/bills/:id/full-payment-pdf", async (req, res) => {
       let refText = "-";
 
       if (p.mode === "Cheque") {
-        // Cheque → Reference column me Cheque No.
         refText = p.chequeNumber || p.referenceNo || "-";
         bankText = p.bankName || "-";
       } else if (p.mode === "UPI") {
-        // UPI → Bank Name column me UPI ID
         bankText = p.upiId || "-";
         refText = p.referenceNo || "-";
       } else {
-        // Cash / BankTransfer default
         bankText = p.bankName || "-";
         refText = p.referenceNo || "-";
       }
 
       const amtText = formatMoney(p.amount || 0);
 
-      // compute heights
-      const dH = doc.heightOfString(paymentDateText, { width: pColDateW - 8 });
-      const pdH = doc.heightOfString(transferDateText, {
+      const pdH = doc.heightOfString(paymentDateText, {
         width: pColPaymentDateW - 8,
       });
       const rH = doc.heightOfString(receiptText, {
@@ -4543,17 +5657,14 @@ app.get("/api/bills/:id/full-payment-pdf", async (req, res) => {
         width: pColAmtW - 8,
       });
 
-      const maxH = Math.max(dH, pdH, rH, mH, bH, refH, aH);
+      const maxH = Math.max(pdH, rH, mH, bH, refH, aH);
       const thisRowH = Math.max(pMinRowH, maxH + 6);
 
       // page-break check
       if (y + thisRowH > doc.page.height - pBottomSafety) {
         const paymentsVisualHeightSoFar = pHeaderDrawH + pFilledHeight;
         if (paymentsVisualHeightSoFar > 0) {
-          drawVerticalsForPaymentsBlock(
-            pTableStartY,
-            paymentsVisualHeightSoFar
-          );
+          drawVerticalsForPaymentsBlock(pTableStartY, paymentsVisualHeightSoFar);
           doc
             .rect(
               pTableLeft,
@@ -4581,14 +5692,13 @@ app.get("/api/bills/:id/full-payment-pdf", async (req, res) => {
           .fill("#F3F3F3")
           .restore();
         doc.font("Helvetica-Bold").fontSize(9);
-        doc.text("Date", pColDateX + 4, y + pHeaderTextYOffset, {
-          width: pColDateW - 8,
-        });
         doc.text(
           "Payment Date",
           pColPaymentDateX + 4,
           y + pHeaderTextYOffset,
-          { width: pColPaymentDateW - 8 }
+          {
+            width: pColPaymentDateW - 8,
+          }
         );
         doc.text("Receipt No.", pColRecX + 4, y + pHeaderTextYOffset, {
           width: pColRecW - 8,
@@ -4596,12 +5706,22 @@ app.get("/api/bills/:id/full-payment-pdf", async (req, res) => {
         doc.text("Mode", pColModeX + 4, y + pHeaderTextYOffset, {
           width: pColModeW - 8,
         });
-        doc.text("Bank Name", pColBankX + 4, y + pHeaderTextYOffset, {
-          width: pColBankW - 8,
-        });
-        doc.text("Reference", pColRefX + 4, y + pHeaderTextYOffset, {
-          width: pColRefW - 8,
-        });
+        doc.text(
+          "Bank Name / UPI ID",
+          pColBankX + 4,
+          y + pHeaderTextYOffset,
+          {
+            width: pColBankW - 8,
+          }
+        );
+        doc.text(
+          "Reference / Cheque No.",
+          pColRefX + 4,
+          y + pHeaderTextYOffset,
+          {
+            width: pColRefW - 8,
+          }
+        );
         doc.text("Amount", pColAmtX + 4, y + pHeaderTextYOffset, {
           width: pColAmtW - 8,
           align: "right",
@@ -4614,7 +5734,6 @@ app.get("/api/bills/:id/full-payment-pdf", async (req, res) => {
 
       // draw cells
       const rowTop = y;
-      const dateY = rowTop + (thisRowH - dH) / 2;
       const pdY = rowTop + (thisRowH - pdH) / 2;
       const recY = rowTop + (thisRowH - rH) / 2;
       const modeY = rowTop + (thisRowH - mH) / 2;
@@ -4622,10 +5741,7 @@ app.get("/api/bills/:id/full-payment-pdf", async (req, res) => {
       const refY = rowTop + (thisRowH - refH) / 2;
       const amtY = rowTop + (thisRowH - aH) / 2;
 
-      doc.text(paymentDateText, pColDateX + 4, dateY, {
-        width: pColDateW - 8,
-      });
-      doc.text(transferDateText, pColPaymentDateX + 4, pdY, {
+      doc.text(paymentDateText, pColPaymentDateX + 4, pdY, {
         width: pColPaymentDateW - 8,
       });
       doc.text(receiptText, pColRecX + 4, recY, {
@@ -4685,14 +5801,13 @@ app.get("/api/bills/:id/full-payment-pdf", async (req, res) => {
             .fill("#F3F3F3")
             .restore();
           doc.font("Helvetica-Bold").fontSize(9);
-          doc.text("Date", pColDateX + 4, y + pHeaderTextYOffset, {
-            width: pColDateW - 8,
-          });
           doc.text(
             "Payment Date",
             pColPaymentDateX + 4,
             y + pHeaderTextYOffset,
-            { width: pColPaymentDateW - 8 }
+            {
+              width: pColPaymentDateW - 8,
+            }
           );
           doc.text("Receipt No.", pColRecX + 4, y + pHeaderTextYOffset, {
             width: pColRecW - 8,
@@ -4700,12 +5815,22 @@ app.get("/api/bills/:id/full-payment-pdf", async (req, res) => {
           doc.text("Mode", pColModeX + 4, y + pHeaderTextYOffset, {
             width: pColModeW - 8,
           });
-          doc.text("Bank Name", pColBankX + 4, y + pHeaderTextYOffset, {
-            width: pColBankW - 8,
-          });
-          doc.text("Reference", pColRefX + 4, y + pHeaderTextYOffset, {
-            width: pColRefW - 8,
-          });
+          doc.text(
+            "Bank Name / UPI ID",
+            pColBankX + 4,
+            y + pHeaderTextYOffset,
+            {
+              width: pColBankW - 8,
+            }
+          );
+          doc.text(
+            "Reference / Cheque No.",
+            pColRefX + 4,
+            y + pHeaderTextYOffset,
+            {
+              width: pColRefW - 8,
+            }
+          );
           doc.text("Amount", pColAmtX + 4, y + pHeaderTextYOffset, {
             width: pColAmtW - 8,
             align: "right",
@@ -4728,12 +5853,11 @@ app.get("/api/bills/:id/full-payment-pdf", async (req, res) => {
       doc
         .rect(pTableLeft, pTableStartY, usableWidth, paymentsVisualHeight)
         .stroke();
-      // set y just after payments table
       y = pTableStartY + paymentsVisualHeight + 12;
     }
 
     // ---------- NOTE + TOTALS BOX ----------
-    const boxWidth2 = 200; // totals box width
+    const boxWidth2 = 200;
     const noteText =
       "* This receipt is generated by the Madhurekha Eye Care Centre. Disputes if any is subjected to Jamshedpur jurisdiction.";
 
@@ -4811,6 +5935,8 @@ app.get("/api/bills/:id/full-payment-pdf", async (req, res) => {
     }
   }
 });
+
+
 
 app.get("/api/profile", async (_req, res) => {
   try {
