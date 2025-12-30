@@ -7,7 +7,6 @@ import fs from "fs";
 import path from "path";
 import { fileURLToPath } from "url";
 import { db } from "./firebaseClient.js";
-// at top of server.js
 import {
   syncBillToSheet,
   syncItemsToSheet,
@@ -161,7 +160,7 @@ function cleanFieldsByMode(mode, data) {
 async function generateInvoiceNumber(billDateInput) {
   const dateStr = billDateInput || new Date().toISOString().slice(0, 10);
   const fy = getFinancialYearCode(dateStr);
-  const prefix = `${fy}/INV-`;
+  const prefix = `${fy}/S-`;
 
   const snap = await db
     .collection("bills")
@@ -181,12 +180,12 @@ async function generateInvoiceNumber(billDateInput) {
   }
 
   const serial = String(nextNumber).padStart(4, "0");
-  const invoiceNo = `${fy}/INV-${serial}`;
+  const invoiceNo = `${fy}/S-${serial}`;
 
   return { invoiceNo, fy, serial };
 }
 
-// Parse "25-26/INV-0001" into { fy: "25-26", invoiceSerial: "0001" }
+// Parse "25-26/S-0001" into { fy: "25-26", invoiceSerial: "0001" }
 function parseInvoiceNumber(invoiceNo) {
   const [fy, rest] = (invoiceNo || "").split("/");
   if (!fy || !rest) return { fy: "00-00", invoiceSerial: "0000" };
@@ -212,7 +211,7 @@ async function generateReceiptId(invoiceNo, billId) {
 
   const seq = snap.size + 1;
   const recSerial = String(seq).padStart(4, "0");
-  return `${fy}/INV-${invoiceSerial}/REC-${recSerial}`;
+  return `${fy}/S-${invoiceSerial}/REC-${recSerial}`;
 }
 
 // Generate refund id per invoice WITHOUT counters collection
@@ -231,7 +230,7 @@ async function generateRefundId(invoiceNo, billId) {
 
   const seq = snap.size + 1;
   const refSerial = String(seq).padStart(4, "0");
-  return `${fy}/INV-${invoiceSerial}/REF-${refSerial}`;
+  return `${fy}/S-${invoiceSerial}/REF-${refSerial}`;
 }
 
 // FRONTEND base URL (React app)
@@ -395,46 +394,84 @@ app.get("/api/dashboard/summary", async (_req, res) => {
   }
 });
 
-// ---------- GET /api/bills (list) ----------
+// ---------- GET /api/bills ----------
 app.get("/api/bills", async (_req, res) => {
   try {
     const key = makeCacheKey("bills", "list");
-    const mapped = await getOrSetCache(key, 30, async () => {
-      const snapshot = await db
+
+    const data = await getOrSetCache(key, 3, async () => {
+      const billsSnap = await db
         .collection("bills")
         .orderBy("invoiceNo", "desc")
         .get();
 
-      return snapshot.docs.map((doc) => {
-        const b = doc.data();
-        const total = Number(b.total || 0);
-        const paidGross = Number(b.paid || 0); // all payments
-        const refunded = Number(b.refunded || 0); // all refunds
-        const paidNet = paidGross - refunded;
-        const balance = b.balance != null ? Number(b.balance) : total - paidNet;
+      const result = [];
 
-        return {
-          id: doc.id,
-          invoiceNo: b.invoiceNo || doc.id,
+      for (const doc of billsSnap.docs) {
+        const b = doc.data();
+        const billId = doc.id;
+
+        const total = Number(b.total || 0);
+        const isProcedureCompleted = b.procedureConfirmed === true;
+
+        // ---------------- PAYMENTS (GROSS) ----------------
+        const paysSnap = await db
+          .collection("payments")
+          .where("billId", "==", billId)
+          .get();
+
+        const paidGross = paysSnap.docs.reduce(
+          (sum, d) => sum + Number(d.data().amount || 0),
+          0
+        );
+
+        // ---------------- REFUNDS ----------------
+        const refundsSnap = await db
+          .collection("refunds")
+          .where("billId", "==", billId)
+          .get();
+
+        const refunded = refundsSnap.docs.reduce(
+          (sum, d) => sum + Number(d.data().amount || 0),
+          0
+        );
+
+        // ---------------- NET CALCULATION ----------------
+        const paidNet = Math.max(paidGross - refunded, 0);
+
+        // 🔥 BUSINESS OVERRIDE
+        // Procedure done = balance must be ZERO no matter what
+        const balance = isProcedureCompleted
+          ? 0
+          : Math.max(total - paidNet, 0);
+
+        result.push({
+          id: billId,
+          invoiceNo: b.invoiceNo || billId,
           patientName: b.patientName || "",
           date: formatDateDot(b.date || null),
+
           total,
-          paid: paidNet,
+          paid: paidNet,        // NET PAID (2000 / 500 etc)
           refunded,
           balance,
-          status: b.status || "PENDING",
-        };
-      });
+
+          procedureConfirmed: isProcedureCompleted, // ✅ REQUIRED BY UI
+          status: isProcedureCompleted || balance <= 0 ? "PAID" : "PENDING",
+        });
+      }
+
+      return result;
     });
 
-    res.json(mapped);
+    res.json(data);
   } catch (err) {
     console.error("GET /api/bills error:", err);
     res.status(500).json({ error: "Failed to fetch bills" });
   }
 });
 
-// ---------- POST /api/bills (create bill + optional first payment) ----------
+
 app.post("/api/bills", async (req, res) => {
   try {
     const {
@@ -681,14 +718,14 @@ app.post("/api/bills", async (req, res) => {
   }
 });
 
-// ---------- GET /api/bills/:id (detail + items + payments + refunds) ----------
+
 app.get("/api/bills/:id", async (req, res) => {
   const id = req.params.id;
   if (!id) return res.status(400).json({ error: "Invalid bill id" });
 
   try {
     const key = makeCacheKey("bill-detail", id);
-    const data = await getOrSetCache(key, 30, async () => {
+    const data = await getOrSetCache(key, 3, async () => {
       const billRef = db.collection("bills").doc(id);
       const billSnap = await billRef.get();
       if (!billSnap.exists) {
@@ -697,7 +734,7 @@ app.get("/api/bills/:id", async (req, res) => {
 
       const bill = billSnap.data();
 
-      // Items
+      // ---------------- ITEMS ----------------
       const itemsSnap = await db
         .collection("items")
         .where("billId", "==", id)
@@ -708,196 +745,90 @@ app.get("/api/bills/:id", async (req, res) => {
         ...doc.data(),
       }));
 
-      // Payments
-      // const paysSnap = await db
-      //   .collection("payments")
-      //   .where("billId", "==", id)
-      //   .get();
+      // ---------------- PAYMENTS ----------------
+      const paysSnap = await db
+        .collection("payments")
+        .where("billId", "==", id)
+        .get();
 
-      // let payments = paysSnap.docs.map((doc) => {
-      //   const d = doc.data();
-      //   const paymentDateTime =
-      //     d.paymentDateTime ||
-      //     (d.paymentDate ? `${d.paymentDate}T00:00:00.000Z` : null);
+      let payments = paysSnap.docs.map((doc) => {
+        const d = doc.data();
+        const paymentDateTime =
+          d.paymentDateTime ||
+          (d.paymentDate ? `${d.paymentDate}T00:00:00.000Z` : null);
 
-      //   return {
-      //     id: doc.id,
-      //     amount: Number(d.amount || 0),
-      //     mode: d.mode || "",
-      //     referenceNo: d.referenceNo || null,
-      //     receiptNo: d.receiptNo || null,
-      //     date: formatDateDot(d.paymentDate || null),
-      //     time: d.paymentTime || null,
-      //     paymentDateTime,
-      //     drawnOn: d.drawnOn || null,
-      //     drawnAs: d.drawnAs || null,
-      //   };
-      // });
+        return {
+          id: doc.id,
+          amount: Number(d.amount || 0),
+          mode: d.mode || "",
+          referenceNo: d.referenceNo || null,
+          receiptNo: d.receiptNo || null,
+          date: formatDateDot(d.paymentDate || null),
+          time: d.paymentTime || null,
+          paymentDateTime,
+          drawnOn: d.drawnOn || null,
+          drawnAs: d.drawnAs || null,
 
-      // payments.sort((a, b) => {
-      //   const da = a.paymentDateTime
-      //     ? new Date(a.paymentDateTime)
-      //     : new Date(0);
-      //   const dbb = b.paymentDateTime
-      //     ? new Date(b.paymentDateTime)
-      //     : new Date(0);
-      //   return da - dbb;
-      // });
+          chequeDate: d.chequeDate || null,
+          chequeNumber: d.chequeNumber || null,
+          bankName: d.bankName || null,
 
-      // const totalPaidGross = payments.reduce(
-      //   (sum, p) => sum + Number(p.amount || 0),
-      //   0
-      // );
+          transferType: d.transferType || null,
+          transferDate: d.transferDate || null,
 
-      // // Refunds
-      // const refundsSnap = await db
-      //   .collection("refunds")
-      //   .where("billId", "==", id)
-      //   .get();
+          upiName: d.upiName || null,
+          upiId: d.upiId || null,
+          upiDate: d.upiDate || null,
+        };
+      });
 
-      // let refunds = refundsSnap.docs.map((doc) => {
-      //   const d = doc.data();
-      //   const refundDateTime =
-      //     d.refundDateTime ||
-      //     (d.refundDate ? `${d.refundDate}T00:00:00.000Z` : null);
-      //   return {
-      //     id: doc.id,
-      //     amount: Number(d.amount || 0),
-      //     mode: d.mode || "",
-      //     referenceNo: d.referenceNo || null,
-      //     refundNo: d.refundReceiptNo || null,
-      //     date: formatDateDot(d.refundDate || null),
-      //     time: d.refundTime || null,
-      //     refundDateTime,
-      //     drawnOn: d.drawnOn || null,
-      //     drawnAs: d.drawnAs || null,
-      //   };
-      // });
+      payments.sort((a, b) => {
+        const da = a.paymentDateTime ? new Date(a.paymentDateTime) : new Date(0);
+        const dbb = b.paymentDateTime ? new Date(b.paymentDateTime) : new Date(0);
+        return da - dbb;
+      });
 
-      // Replace the GET /api/bills/:id payments mapping section (around line 510-540 in server.js)
+      const totalPaidGross = payments.reduce(
+        (sum, p) => sum + Number(p.amount || 0),
+        0
+      );
 
-// Payments
-const paysSnap = await db
-  .collection("payments")
-  .where("billId", "==", id)
-  .get();
+      // ---------------- REFUNDS ----------------
+      const refundsSnap = await db
+        .collection("refunds")
+        .where("billId", "==", id)
+        .get();
 
-let payments = paysSnap.docs.map((doc) => {
-  const d = doc.data();
-  const paymentDateTime =
-    d.paymentDateTime ||
-    (d.paymentDate ? `${d.paymentDate}T00:00:00.000Z` : null);
+      let refunds = refundsSnap.docs.map((doc) => {
+        const d = doc.data();
+        const refundDateTime =
+          d.refundDateTime ||
+          (d.refundDate ? `${d.refundDate}T00:00:00.000Z` : null);
 
-  return {
-    id: doc.id,
-    amount: Number(d.amount || 0),
-    mode: d.mode || "",
-    
-    // Generic fields
-    referenceNo: d.referenceNo || null,
-    receiptNo: d.receiptNo || null,
-    date: formatDateDot(d.paymentDate || null),
-    time: d.paymentTime || null,
-    paymentDateTime,
-    drawnOn: d.drawnOn || null,
-    drawnAs: d.drawnAs || null,
-    
-    // Cheque-specific fields
-    chequeDate: d.chequeDate || null,
-    cheque_date: d.cheque_date || null,
-    chequeNumber: d.chequeNumber || null,
-    cheque_no: d.cheque_no || null,
-    chequeNum: d.chequeNum || null,
-    
-    // Bank-specific fields
-    bankName: d.bankName || null,
-    bank: d.bank || null,
-    bank_name: d.bank_name || null,
-    transferType: d.transferType || null,
-    transferDate: d.transferDate || null,
-    transfer_date: d.transfer_date || null,
-    
-    // UPI-specific fields
-    upiName: d.upiName || null,
-    upiId: d.upiId || null,
-    upi_id: d.upi_id || null,
-    upiDate: d.upiDate || null,
-    upi_date: d.upi_date || null,
-    platform: d.platform || null,
-    upiPlatform: d.upiPlatform || null,
-    transactionId: d.transactionId || null,
-  };
-});
+        return {
+          id: doc.id,
+          amount: Number(d.amount || 0),
+          mode: d.mode || "",
+          referenceNo: d.referenceNo || null,
+          refundNo: d.refundReceiptNo || null,
+          date: formatDateDot(d.refundDate || null),
+          time: d.refundTime || null,
+          refundDateTime,
+          drawnOn: d.drawnOn || null,
+          drawnAs: d.drawnAs || null,
 
-payments.sort((a, b) => {
-  const da = a.paymentDateTime
-    ? new Date(a.paymentDateTime)
-    : new Date(0);
-  const dbb = b.paymentDateTime
-    ? new Date(b.paymentDateTime)
-    : new Date(0);
-  return da - dbb;
-});
+          chequeDate: d.chequeDate || null,
+          chequeNumber: d.chequeNumber || null,
+          bankName: d.bankName || null,
 
-const totalPaidGross = payments.reduce(
-  (sum, p) => sum + Number(p.amount || 0),
-  0
-);
+          transferType: d.transferType || null,
+          transferDate: d.transferDate || null,
 
-// Refunds
-const refundsSnap = await db
-  .collection("refunds")
-  .where("billId", "==", id)
-  .get();
-
-let refunds = refundsSnap.docs.map((doc) => {
-  const d = doc.data();
-  const refundDateTime =
-    d.refundDateTime ||
-    (d.refundDate ? `${d.refundDate}T00:00:00.000Z` : null);
-  
-  return {
-    id: doc.id,
-    amount: Number(d.amount || 0),
-    mode: d.mode || "",
-    
-    // Generic fields
-    referenceNo: d.referenceNo || null,
-    refNo: d.refNo || null,
-    reference_no: d.reference_no || null,
-    refundNo: d.refundReceiptNo || null,
-    date: formatDateDot(d.refundDate || null),
-    time: d.refundTime || null,
-    refundDateTime,
-    drawnOn: d.drawnOn || null,
-    drawnAs: d.drawnAs || null,
-    
-    // Cheque-specific fields
-    chequeDate: d.chequeDate || null,
-    cheque_date: d.cheque_date || null,
-    chequeNumber: d.chequeNumber || null,
-    cheque_no: d.cheque_no || null,
-    chequeNum: d.chequeNum || null,
-    
-    // Bank-specific fields
-    bankName: d.bankName || null,
-    bank: d.bank || null,
-    bank_name: d.bank_name || null,
-    transferType: d.transferType || null,
-    transferDate: d.transferDate || null,
-    transfer_date: d.transfer_date || null,
-    
-    // UPI-specific fields
-    upiName: d.upiName || null,
-    upiId: d.upiId || null,
-    upi_id: d.upi_id || null,
-    upiDate: d.upiDate || null,
-    upi_date: d.upi_date || null,
-    platform: d.platform || null,
-    upiPlatform: d.upiPlatform || null,
-    transactionId: d.transactionId || null,
-  };
-});
+          upiName: d.upiName || null,
+          upiId: d.upiId || null,
+          upiDate: d.upiDate || null,
+        };
+      });
 
       refunds.sort((a, b) => {
         const da = a.refundDateTime ? new Date(a.refundDateTime) : new Date(0);
@@ -910,6 +841,7 @@ let refunds = refundsSnap.docs.map((doc) => {
         0
       );
 
+      // ---------------- FINAL CALCULATION ----------------
       const total = Number(bill.total || 0);
       const netPaid = totalPaidGross - totalRefunded;
       const balance = total - netPaid;
@@ -917,6 +849,7 @@ let refunds = refundsSnap.docs.map((doc) => {
 
       const primaryPayment = payments[0] || null;
 
+      // ---------------- RESPONSE ----------------
       return {
         id,
         invoiceNo: bill.invoiceNo || id,
@@ -924,21 +857,24 @@ let refunds = refundsSnap.docs.map((doc) => {
         sex: bill.sex || null,
         address: bill.address || "",
         age: bill.age || null,
-        //date: formatDateDot(bill.date || null),
         date: bill.date || null,
         procedureDone: bill.procedureDone || null,
+        procedureConfirmed: bill.procedureConfirmed || false, // ✅ ADD THIS LINE
+
         total,
-        paid: netPaid,
+        paid: netPaid,                 // ✅ NET PAID
+        totalPaid: totalPaidGross,     // ✅ GROSS PAID
         refunded: totalRefunded,
-        totalPaid: totalPaidGross,
         balance,
         status,
-        // doctorReg1 and doctorReg2 intentionally omitted (static in PDFs only)
+
         remarks: bill.remarks || null,
         services: bill.services || null,
+
         items,
         payments,
         refunds,
+
         paymentMode: primaryPayment?.mode || null,
         referenceNo: primaryPayment?.referenceNo || null,
         drawnOn: primaryPayment?.drawnOn || null,
@@ -956,7 +892,117 @@ let refunds = refundsSnap.docs.map((doc) => {
   }
 });
 
+
+// app.patch("/api/bills/:id", async (req, res) => {
+//   const id = req.params.id;
+//   const { procedureConfirmed } = req.body;
+
+//   if (!id) {
+//     return res.status(400).json({ error: "Invalid bill id" });
+//   }
+
+//   try {
+//     const billRef = db.collection("bills").doc(id);
+//     const billSnap = await billRef.get();
+
+//     if (!billSnap.exists) {
+//       return res.status(404).json({ error: "Bill not found" });
+//     }
+
+//     // Update the bill with procedureConfirmed flag
+//     await billRef.update({
+//       procedureConfirmed: procedureConfirmed === true,
+//       updatedAt: new Date().toISOString()
+//     });
+
+//     res.json({ 
+//       success: true, 
+//       message: "Bill updated successfully",
+//       procedureConfirmed 
+//     });
+//   } catch (err) {
+//     console.error("Error updating bill:", err);
+//     res.status(500).json({ error: "Failed to update bill" });
+//   }
+// });
+
+
 // ---------- POST /api/bills/:id/payments (add partial payment) ----------
+
+// app.patch("/api/bills/:id", async (req, res) => {
+//   const id = req.params.id;
+//   const { procedureConfirmed } = req.body;
+
+//   if (!id) {
+//     return res.status(400).json({ error: "Invalid bill id" });
+//   }
+
+//   try {
+//     const billRef = db.collection("bills").doc(id);
+//     const billSnap = await billRef.get();
+
+//     if (!billSnap.exists) {
+//       return res.status(404).json({ error: "Bill not found" });
+//     }
+
+//     // ✅ Update bill
+//     await billRef.update({
+//       procedureConfirmed: procedureConfirmed === true,
+//       updatedAt: new Date().toISOString(),
+//     });
+
+//     // 🔥 CRITICAL FIX — CLEAR STALE CACHE
+//     deleteCache(makeCacheKey("bill-detail", id));
+//     deleteCache(makeCacheKey("bills", "list"));
+
+//     res.json({
+//       success: true,
+//       procedureConfirmed: true,
+//       message: "Procedure marked as completed",
+//     });
+//   } catch (err) {
+//     console.error("PATCH /api/bills/:id error:", err);
+//     res.status(500).json({ error: "Failed to update bill" });
+//   }
+// });
+
+
+app.patch("/api/bills/:id", async (req, res) => {
+  const id = req.params.id;
+  const { procedureConfirmed } = req.body;
+
+  try {
+    const billRef = db.collection("bills").doc(id);
+    const snap = await billRef.get();
+
+    if (!snap.exists) {
+      return res.status(404).json({ error: "Bill not found" });
+    }
+
+    await billRef.update({
+      procedureConfirmed: procedureConfirmed === true,
+      updatedAt: new Date().toISOString(),
+    });
+
+    // safe cache clear
+    // try {
+    //   if (typeof deleteCache === "function") {
+    //     deleteCache(makeCacheKey("bill-detail", id));
+    //     deleteCache(makeCacheKey("bills", "list"));
+    //   }
+    // } catch (e) {
+    //   console.warn("Cache clear skipped:", e.message);
+    // }
+
+    res.json({ success: true, procedureConfirmed: true });
+  } catch (err) {
+    console.error("PATCH bill error:", err);
+    res.status(500).json({ error: err.message });
+  }
+});
+
+
+
 app.post("/api/bills/:id/payments", async (req, res) => {
   const billId = req.params.id;
   if (!billId) {
@@ -1254,6 +1300,414 @@ app.get("/api/payments/:id", async (req, res) => {
 });
 
 
+app.put("/api/payments/:id", async (req, res) => {
+  const paymentId = req.params.id;
+  if (!paymentId) return res.status(400).json({ error: "Invalid payment id" });
+
+  const {
+    amount,
+    mode,
+    referenceNo,
+    drawnOn,
+    drawnAs,
+
+    // 🔵 ADDED - accept paymentDate for editing
+    paymentDate,
+
+    chequeDate,
+    chequeNumber,
+    bankName,
+    transferType,
+    transferDate,
+    upiName,
+    upiId,
+    upiDate,
+  } = req.body;
+
+  const newAmount = Number(amount);
+  if (Number.isNaN(newAmount) || newAmount <= 0) {
+    return res.status(400).json({ error: "Amount must be > 0" });
+  }
+
+  try {
+    const paymentRef = db.collection("payments").doc(paymentId);
+    const paymentSnap = await paymentRef.get();
+    if (!paymentSnap.exists) {
+      return res.status(404).json({ error: "Payment not found" });
+    }
+
+    const oldPayment = paymentSnap.data();
+    const billId = oldPayment.billId;
+
+    const billRef = db.collection("bills").doc(billId);
+    const billSnap = await billRef.get();
+    if (!billSnap.exists) {
+      return res.status(404).json({ error: "Bill not found" });
+    }
+
+    const bill = billSnap.data();
+
+    // ---- recompute totals ----
+    const delta = newAmount - Number(oldPayment.amount || 0);
+    const oldPaid = Number(bill.paid || 0);
+    const refunded = Number(bill.refunded || 0);
+
+    const newPaid = oldPaid + delta;
+    const effectivePaid = newPaid - refunded;
+    const total = Number(bill.total || 0);
+    const newBalance = total - effectivePaid;
+    const newStatus = computeStatus(total, effectivePaid);
+
+    const finalMode = mode || oldPayment.mode;
+
+    const updatedPayment = cleanFieldsByMode(finalMode, {
+      amount: newAmount,
+      mode: finalMode,
+      referenceNo: referenceNo ?? null,
+      drawnOn: drawnOn ?? null,
+      drawnAs: drawnAs ?? null,
+
+      // 🔵 ADDED - update paymentDate if provided
+      paymentDate: paymentDate || oldPayment.paymentDate,
+
+      chequeDate: chequeDate ?? null,
+      chequeNumber: chequeNumber ?? null,
+      bankName: bankName ?? null,
+
+      transferType: transferType ?? null,
+      transferDate: transferDate ?? null,
+
+      upiName: upiName ?? null,
+      upiId: upiId ?? null,
+      upiDate: upiDate ?? null,
+    });
+
+    const batch = db.batch();
+
+    batch.update(paymentRef, updatedPayment);
+
+    batch.update(billRef, {
+      paid: newPaid,
+      balance: newBalance,
+      status: newStatus,
+    });
+
+    await batch.commit();
+    cache.flushAll();
+
+    res.json({
+      success: true,
+      paymentId,
+      amount: newAmount,
+      billId,
+      paid: newPaid,
+      balance: newBalance,
+      status: newStatus,
+    });
+  } catch (err) {
+    console.error("EDIT payment error:", err);
+    res.status(500).json({ error: "Failed to edit payment" });
+  }
+});
+
+// ---------- PUT /api/refunds/:id (EDIT REFUND) ----------
+app.put("/api/refunds/:id", async (req, res) => {
+  const refundId = req.params.id;
+  if (!refundId) return res.status(400).json({ error: "Invalid refund id" });
+
+  const {
+    amount,
+    mode,
+    refundDate,
+    referenceNo,
+    drawnOn,
+    drawnAs,
+
+    chequeDate,
+    chequeNumber,
+    bankName,
+
+    transferType,
+    transferDate,
+
+    upiName,
+    upiId,
+    upiDate,
+  } = req.body;
+
+  const newAmount = Number(amount);
+  if (!newAmount || newAmount <= 0) {
+    return res.status(400).json({ error: "Refund amount must be > 0" });
+  }
+
+  try {
+    const refundRef = db.collection("refunds").doc(refundId);
+    const refundSnap = await refundRef.get();
+
+    if (!refundSnap.exists) {
+      return res.status(404).json({ error: "Refund not found" });
+    }
+
+    const oldRefund = refundSnap.data();
+    const billId = oldRefund.billId;
+
+    const billRef = db.collection("bills").doc(billId);
+    const billSnap = await billRef.get();
+
+    if (!billSnap.exists) {
+      return res.status(404).json({ error: "Bill not found" });
+    }
+
+    const bill = billSnap.data();
+
+    // 🔴 CORE LOGIC — adjust bill totals safely
+    const oldRefundAmount = Number(oldRefund.amount || 0);
+    const delta = newAmount - oldRefundAmount;
+
+    const oldRefunded = Number(bill.refunded || 0);
+    const oldNetPaid = Number(bill.paid || 0);
+    const total = Number(bill.total || 0);
+
+    const newRefunded = oldRefunded + delta;
+    const newNetPaid = oldNetPaid - delta;
+    const newBalance = total - newNetPaid;
+    const newStatus = computeStatus(total, newNetPaid);
+
+    if (newNetPaid < 0) {
+      return res.status(400).json({
+        error: "Refund exceeds paid amount",
+      });
+    }
+
+    const batch = db.batch();
+
+    batch.update(refundRef, {
+      amount: newAmount,
+      mode: mode || "Cash",
+      refundDate,
+      referenceNo: referenceNo || null,
+      drawnOn: drawnOn || null,
+      drawnAs: drawnAs || null,
+
+      chequeDate: chequeDate || null,
+      chequeNumber: chequeNumber || null,
+      bankName: bankName || null,
+
+      transferType: transferType || null,
+      transferDate: transferDate || null,
+
+      upiName: upiName || null,
+      upiId: upiId || null,
+      upiDate: upiDate || null,
+    });
+
+    batch.update(billRef, {
+      refunded: newRefunded,
+      paid: newNetPaid,
+      balance: newBalance,
+      status: newStatus,
+    });
+
+    await batch.commit();
+
+    cache.flushAll();
+
+    res.json({
+      success: true,
+      refundId,
+      newNetPaid,
+      newBalance,
+      newRefunded,
+    });
+  } catch (err) {
+    console.error("PUT /api/refunds/:id error:", err);
+    res.status(500).json({ error: "Failed to update refund" });
+  }
+});
+
+app.put("/api/bills/:id", async (req, res) => {
+  const billId = req.params.id;
+  if (!billId) return res.status(400).json({ error: "Invalid bill id" });
+
+  try {
+    const billRef = db.collection("bills").doc(billId);
+    const billSnap = await billRef.get();
+
+    if (!billSnap.exists) {
+      return res.status(404).json({ error: "Bill not found" });
+    }
+
+    const oldBill = billSnap.data();
+
+    // Editable fields from frontend (everything except payment info)
+    const {
+      patientName,
+      sex,
+      address,
+      age,
+      date,
+      remarks,
+      services,
+      procedureDone, // ✅ ADD
+    } = req.body;
+
+    if (!date && !oldBill.date) {
+      return res.status(400).json({ error: "Bill date is required" });
+    }
+    const jsDate = date || oldBill.date;
+
+    // --- NORMALIZE SERVICES (same style as POST /api/bills) ---
+    const normalizedServices = Array.isArray(services)
+      ? services.map((s) => {
+          const qty = Number(s.qty) || 0;
+          const rate = Number(s.rate) || 0;
+          const amount = qty * rate;
+          return {
+            item: s.item || s.description || "",
+            details: s.details || "",
+            qty,
+            rate,
+            amount,
+          };
+        })
+      : [];
+
+    // YE data hum ITEMS collection me likhenge
+    const itemsData = normalizedServices.map((s) => {
+      const description = s.item || s.details || "";
+      return {
+        description,
+        qty: s.qty,
+        rate: s.rate,
+        amount: s.amount,
+      };
+    });
+
+    const total = itemsData.reduce(
+      (sum, it) => sum + Number(it.amount || 0),
+      0
+    );
+
+    // keep payments/refunds as is
+    const paidGross = Number(oldBill.paid || 0);
+    const refunded = Number(oldBill.refunded || 0);
+    const effectivePaid = paidGross - refunded;
+    const balance = total - effectivePaid;
+    const status = computeStatus(total, effectivePaid);
+
+    const batch = db.batch();
+
+    // 1) Update bill doc
+    const finalPatientName = patientName ?? oldBill.patientName ?? "";
+
+    batch.update(billRef, {
+      patientName: finalPatientName,
+      sex: sex ?? oldBill.sex ?? null,
+      address: address ?? oldBill.address ?? "",
+      age: typeof age !== "undefined" ? Number(age) : oldBill.age ?? null,
+      date: jsDate,
+      procedureDone:
+        typeof procedureDone !== "undefined"
+          ? procedureDone
+          : oldBill.procedureDone ?? null,
+
+      total,
+      paid: paidGross,
+      refunded,
+      balance,
+      status,
+      remarks:
+        typeof remarks !== "undefined" ? remarks : oldBill.remarks ?? null,
+      services: normalizedServices,
+    });
+
+    // 2) Replace items collection for this bill
+    //    (pehle saare old items delete, fir naya set create)
+    const existingItemsSnap = await db
+      .collection("items")
+      .where("billId", "==", billId)
+      .get();
+
+    existingItemsSnap.forEach((doc) => {
+      batch.delete(doc.ref);
+    });
+
+    // 3) NEW ITEMS INSERT with deterministic ID:
+    itemsData.forEach((item, index) => {
+      const lineNo = index + 1;
+      const itemId = `${billId}-${String(lineNo).padStart(2, "0")}`; // e.g. 25-26_INV-0001-01
+
+      const qty = Number(item.qty || 0);
+      const rate = Number(item.rate || 0);
+      const amount = Number(item.amount || qty * rate || 0);
+
+      batch.set(db.collection("items").doc(itemId), {
+        billId,
+        patientName: finalPatientName,
+        description: item.description,
+        qty,
+        rate,
+        amount,
+      });
+    });
+
+    await batch.commit();
+
+    // clear caches so GET /api/bills and /api/bills/:id show updated data
+    cache.flushAll();
+
+    // update Google Sheet (optional but consistent with create)
+    syncBillToSheet({
+      id: billId,
+      invoiceNo: oldBill.invoiceNo || billId,
+      patientName: finalPatientName,
+      address: address ?? oldBill.address ?? "",
+      age: typeof age !== "undefined" ? Number(age) : oldBill.age ?? null,
+      date: jsDate,
+      total,
+      paid: paidGross,
+      refunded,
+      balance,
+      status,
+      sex: sex ?? oldBill.sex ?? null,
+    });
+
+    syncItemsToSheet(
+      billId,
+      billId,
+      finalPatientName,
+      itemsData.map((it) => ({
+        description: it.description,
+        qty: it.qty,
+        rate: it.rate,
+        amount: it.amount,
+      }))
+    );
+
+    res.json({
+      id: billId,
+      invoiceNo: oldBill.invoiceNo || billId,
+      patientName: finalPatientName,
+      sex: sex ?? oldBill.sex ?? null,
+      address: address ?? oldBill.address ?? "",
+      age: typeof age !== "undefined" ? Number(age) : oldBill.age ?? null,
+      date: jsDate,
+      total,
+      paid: paidGross,
+      refunded,
+      balance,
+      status,
+      remarks:
+        typeof remarks !== "undefined" ? remarks : oldBill.remarks ?? null,
+      services: normalizedServices,
+    });
+  } catch (err) {
+    console.error("PUT /api/bills/:id error:", err);
+    res.status(500).json({ error: "Failed to update bill" });
+  }
+});
+
+
 // ---------- GET /api/refunds/:id (FOR EDIT REFUND) ----------
 app.get("/api/refunds/:id", async (req, res) => {
   const id = req.params.id;
@@ -1296,6 +1750,1978 @@ app.get("/api/refunds/:id", async (req, res) => {
   } catch (err) {
     console.error("GET /api/refunds/:id error:", err);
     res.status(500).json({ error: "Failed to load refund" });
+  }
+});
+
+
+// ---------- PDF: Payment Receipt (A4 half page, professional layout) ----------
+app.get("/api/payments/:id/receipt-html-pdf", async (req, res) => {
+  const id = req.params.id;
+  if (!id) return res.status(400).json({ error: "Invalid payment id" });
+
+  try {
+    const paymentRef = db.collection("payments").doc(id);
+    const paymentSnap = await paymentRef.get();
+    if (!paymentSnap.exists) {
+      return res.status(404).json({ error: "Payment not found" });
+    }
+    const payment = paymentSnap.data();
+    const billId = payment.billId;
+
+    const billRef = db.collection("bills").doc(billId);
+    const billSnap = await billRef.get();
+    if (!billSnap.exists) {
+      return res.status(404).json({ error: "Bill not found" });
+    }
+    const bill = billSnap.data();
+    const billTotal = Number(bill.total || 0);
+
+    const paysSnap = await db
+      .collection("payments")
+      .where("billId", "==", billId)
+      .get();
+
+    const allPayments = paysSnap.docs
+      .map((doc) => {
+        const d = doc.data();
+        const paymentDateTime =
+          d.paymentDateTime ||
+          (d.paymentDate ? `${d.paymentDate}T00:00:00.000Z` : null);
+        return {
+          id: doc.id,
+          paymentDateTime,
+          amount: Number(d.amount || 0),
+        };
+      })
+      .sort((a, b) => {
+        const da = a.paymentDateTime
+          ? new Date(a.paymentDateTime)
+          : new Date(0);
+        const dbb = b.paymentDateTime
+          ? new Date(b.paymentDateTime)
+          : new Date(0);
+        return da - dbb;
+      });
+
+    let cumulativePaid = 0;
+    let paidTillThis = 0;
+    let balanceAfterThis = billTotal;
+
+    for (const p of allPayments) {
+      cumulativePaid += p.amount;
+      if (p.id === id) {
+        paidTillThis = cumulativePaid;
+        balanceAfterThis = billTotal - paidTillThis;
+        break;
+      }
+    }
+
+    function formatMoney(v) {
+      return Number(v || 0).toFixed(2);
+    }
+
+    const patientName = bill.patientName || "";
+    const address = bill.address || "";
+    const drawnOn = payment.drawnOn || null;
+    const drawnAs = payment.drawnAs || null;
+    const mode = payment.mode || "Cash";
+    const referenceNo = payment.referenceNo || null;
+    const receiptNo = payment.receiptNo || `R-${String(id).padStart(4, "0")}`;
+
+    const chequeDate = payment.chequeDate || null;
+    const chequeNumber = payment.chequeNumber || null;
+    const bankName = payment.bankName || null;
+    const transferType = payment.transferType || null;
+    const transferDate = payment.transferDate || null;
+    const upiName = payment.upiName || null;
+    const upiId = payment.upiId || null;
+    const upiDate = payment.upiDate || null;
+
+    // ---------- FETCH CLINIC PROFILE FRESH FOR PDF ----------
+    const profile = await getClinicProfile({ force: true });
+    const clinicName = profileValue(profile, "clinicName");
+    const clinicAddress = profileValue(profile, "address");
+    const clinicPAN = profileValue(profile, "pan");
+    const clinicRegNo = profileValue(profile, "regNo");
+    const doctor1Name = profileValue(profile, "doctor1Name");
+    const doctor1RegNo = profileValue(profile, "doctor1RegNo");
+    const doctor2Name = profileValue(profile, "doctor2Name");
+    const doctor2RegNo = profileValue(profile, "doctor2RegNo");
+    const patientRepresentative = profileValue(
+      profile,
+      "patientRepresentative"
+    );
+    const clinicRepresentative = profileValue(profile, "clinicRepresentative");
+
+    res.setHeader("Content-Type", "application/pdf");
+    res.setHeader(
+      "Content-Disposition",
+      `inline; filename="receipt-${id}.pdf"`
+    );
+
+    const doc = new PDFDocument({
+      size: "A4",
+      margin: 36,
+    });
+
+    doc.pipe(res);
+
+    const pageWidth = doc.page.width;
+    const usableWidth = pageWidth - 72;
+    let y = 40;
+
+    const logoLeftPath = path.join(__dirname, "resources", "logo-left.png");
+    const logoRightPath = path.join(__dirname, "resources", "logo-right.png");
+
+    const leftLogoX = 36;
+    const rightLogoX = pageWidth - 36;
+
+    // HEADER
+    try {
+      doc.image(logoLeftPath, leftLogoX, y, { width: 32, height: 32 });
+    } catch (e) {}
+    try {
+      doc.image(logoRightPath, rightLogoX - 32, y, { width: 32, height: 32 });
+    } catch (e) {}
+
+    doc
+      .font("Helvetica-Bold")
+      .fontSize(13)
+      .text(clinicName || "", 0, y + 2, {
+        align: "center",
+        width: pageWidth,
+      });
+
+    doc
+      .font("Helvetica")
+      .fontSize(9)
+      .text(clinicAddress || "", 0, y + 20, {
+        align: "center",
+        width: pageWidth,
+      })
+      .text(
+        (clinicPAN ? `PAN: ${clinicPAN}` : "") +
+          (clinicPAN && clinicRegNo ? "   |   " : "") +
+          (clinicRegNo ? `Reg. No.: ${clinicRegNo}` : ""),
+        {
+          align: "center",
+          width: pageWidth,
+        }
+      );
+
+    y += 48;
+
+    doc
+      .moveTo(36, y)
+      .lineTo(pageWidth - 36, y)
+      .stroke();
+    y += 6;
+
+    // DOCTOR LINE (from profile)
+    doc.font("Helvetica-Bold").fontSize(9);
+    doc.text(doctor1Name || "", 36, y);
+    doc.text(doctor2Name || "", pageWidth / 2, y, {
+      align: "right",
+      width: usableWidth / 2,
+    });
+
+    y += 12;
+    doc.font("Helvetica").fontSize(8);
+    doc.text(doctor1RegNo ? `Reg. No.: ${doctor1RegNo}` : "", 36, y);
+    doc.text(
+      doctor2RegNo ? `Reg. No.: ${doctor2RegNo}` : "",
+      pageWidth / 2,
+      y,
+      {
+        align: "right",
+        width: usableWidth / 2,
+      }
+    );
+
+    y += 16;
+
+    // TITLE BAR
+    doc
+      .save()
+      .rect(36, y, usableWidth, 18)
+      .fill("#F3F3F3")
+      .restore()
+      .rect(36, y, usableWidth, 18)
+      .stroke();
+
+    doc
+      .font("Helvetica-Bold")
+      .fontSize(10)
+      .text("PAYMENT RECEIPT", 36, y + 4, {
+        align: "center",
+        width: usableWidth,
+      });
+
+    y += 26;
+
+    // COMMON LAYOUT (left details + right summary)
+    const leftX = 36;
+    const rightBoxWidth = 180;
+    const rightX = pageWidth - 36 - rightBoxWidth;
+
+    doc.font("Helvetica").fontSize(9);
+    doc.text(`Receipt No.: ${receiptNo}`, leftX, y);
+    doc.text(`Date: ${formatDateDot(payment.paymentDate || "")}`, rightX, y, {
+      width: rightBoxWidth,
+      align: "right",
+    });
+
+    y += 16;
+
+    const detailsTopY = y;
+    const leftWidth = rightX - leftX - 10;
+
+    // doc
+    //   .font("Helvetica-Bold")
+    //   .text(`Patient Name: ${patientName}`, leftX, detailsTopY, {
+    //     width: leftWidth,
+    //   });
+
+    // let detailsY = doc.y + 4;
+    doc
+      .font("Helvetica-Bold")
+      .text(`Patient Name: ${patientName}`, leftX, detailsTopY, {
+        width: leftWidth,
+      });
+
+    doc.font("Helvetica").text(`Address: ${address}`, leftX, doc.y + 3, {
+      width: leftWidth,
+    });
+
+    let detailsY = doc.y + 4;
+
+    doc.font("Helvetica");
+
+    const addDetail = (label, value) => {
+      if (!value) return;
+      doc.text(`${label} ${value}`, leftX, detailsY, { width: leftWidth });
+      detailsY = doc.y + 3;
+    };
+
+    addDetail("Amount Received: Rs", formatMoney(payment.amount));
+    addDetail("Payment Mode:", mode);
+    addDetail("Cheque No.:", chequeNumber);
+    addDetail("Cheque Date:", formatDateDot(chequeDate));
+    addDetail("Bank:", bankName);
+    addDetail("Transfer Type:", transferType);
+    addDetail("Transfer Date:", formatDateDot(transferDate));
+    addDetail("UPI ID:", upiId);
+    addDetail("UPI Name:", upiName);
+    addDetail("UPI Date:", formatDateDot(upiDate));
+    addDetail("Reference No.:", referenceNo);
+    addDetail("Drawn On:", drawnOn);
+    addDetail("Drawn As:", drawnAs);
+
+    // RIGHT BILL SUMMARY BOX
+    const boxY = detailsTopY;
+    const lineH = 12;
+    const boxHeight = 100;
+
+    doc.rect(rightX, boxY, rightBoxWidth, boxHeight).stroke();
+
+    let by = boxY + 4;
+    doc
+      .font("Helvetica-Bold")
+      .fontSize(9)
+      .text("Bill Summary", rightX + 6, by);
+    by += lineH + 2;
+    doc.font("Helvetica").fontSize(9);
+
+    const billNoText = bill.invoiceNo || billId;
+
+    const addRow = (label, value) => {
+      doc.text(label, rightX + 6, by);
+      doc.text(value, rightX + 6, by, {
+        width: rightBoxWidth - 12,
+        align: "right",
+      });
+      by += lineH;
+    };
+
+    addRow("Bill No.:", billNoText);
+    addRow("Bill Date:", formatDateDot(bill.date || ""));
+    addRow("Bill Total:", `Rs ${formatMoney(billTotal)}`);
+    addRow("Paid (incl. this):", `Rs ${formatMoney(paidTillThis)}`);
+    addRow("Balance:", `Rs ${formatMoney(balanceAfterThis)}`);
+
+    // FOOTNOTE + SIGNATURES
+    y = Math.max(detailsY + 6, boxY + boxHeight + 6);
+
+    doc
+      .font("Helvetica")
+      .fontSize(8)
+      .text("* Dispute if any subject to Jamshedpur Jurisdiction", leftX, y, {
+        width: usableWidth,
+      });
+
+    const sigY = y + 40;
+    const sigWidth = 160;
+
+    // doc
+    //   .moveTo(leftX, sigY)
+    //   .lineTo(leftX + sigWidth, sigY)
+    //   .dash(1, { space: 2 })
+    //   .stroke()
+    //   .undash();
+    // doc.fontSize(8).text(patientRepresentative || "", leftX, sigY + 4, {
+    //   width: sigWidth,
+    //   align: "center",
+    // });
+
+    const rightSigX = pageWidth - 36 - sigWidth;
+    doc
+      .moveTo(rightSigX, sigY)
+      .lineTo(rightSigX + sigWidth, sigY)
+      .dash(1, { space: 2 })
+      .stroke()
+      .undash();
+    doc.fontSize(8).text(clinicRepresentative || "", rightSigX, sigY + 4, {
+      width: sigWidth,
+      align: "center",
+    });
+
+    doc.end();
+  } catch (err) {
+    console.error("receipt-html-pdf error:", err);
+    if (!res.headersSent) {
+      res.status(500).json({ error: "Failed to generate receipt PDF" });
+    }
+  }
+});
+
+
+app.get("/api/refunds/:id/refund-html-pdf", async (req, res) => {
+  const id = req.params.id;
+  if (!id) return res.status(400).json({ error: "Invalid refund id" });
+
+  try {
+    // ---------- REFUND ----------
+    const refundRef = db.collection("refunds").doc(id);
+    const refundSnap = await refundRef.get();
+    if (!refundSnap.exists) {
+      return res.status(404).json({ error: "Refund not found" });
+    }
+    const refund = refundSnap.data();
+    const billId = refund.billId;
+
+    // ---------- BILL ----------
+    const billRef = db.collection("bills").doc(billId);
+    const billSnap = await billRef.get();
+    if (!billSnap.exists) {
+      return res.status(404).json({ error: "Bill not found" });
+    }
+    const bill = billSnap.data();
+    const billTotal = Number(bill.total || 0);
+
+    // ---------- PAYMENTS (GROSS) ----------
+    const paysSnap = await db
+      .collection("payments")
+      .where("billId", "==", billId)
+      .get();
+
+    const payments = paysSnap.docs.map((doc) => {
+      const d = doc.data();
+      return {
+        amount: Number(d.amount || 0),
+        date: new Date(
+          d.paymentDateTime ||
+            (d.paymentDate ? `${d.paymentDate}T00:00:00.000Z` : 0)
+        ),
+      };
+    });
+
+    const totalPaidGross = payments.reduce((s, p) => s + p.amount, 0);
+
+    // ---------- REFUNDS (ORDERED) ----------
+    const refundsSnap = await db
+      .collection("refunds")
+      .where("billId", "==", billId)
+      .get();
+
+    const refunds = refundsSnap.docs
+      .map((doc) => {
+        const d = doc.data();
+        return {
+          id: doc.id,
+          amount: Number(d.amount || 0),
+          date: new Date(
+            d.refundDateTime ||
+              (d.refundDate ? `${d.refundDate}T00:00:00.000Z` : 0)
+          ),
+        };
+      })
+      .sort((a, b) => a.date - b.date);
+
+    // ---------- REFUND TILL THIS RECEIPT ----------
+    let refundedTillThis = 0;
+    for (const r of refunds) {
+      refundedTillThis += r.amount;
+      if (r.id === id) break;
+    }
+
+    // ---------- FINAL NUMBERS (FIXED) ----------
+    // Net amount that customer has actually paid (after deducting refunds)
+    const netPaidTillThis = totalPaidGross - refundedTillThis;
+    
+    // Balance = Bill Total - Net Paid
+    // If Net Paid < Bill Total, customer owes money (positive balance)
+    // If Net Paid >= Bill Total, balance should be 0
+    const balanceAfterThis = Math.max(0, billTotal - netPaidTillThis);
+
+    // ---------- HELPERS ----------
+    function formatMoney(v) {
+      return Number(v || 0).toFixed(2);
+    }
+
+    // Assuming you already have these utility functions somewhere
+    // formatDateDot, getClinicProfile, profileValue, etc.
+
+    const patientName = bill.patientName || "";
+    const address = bill.address || "";
+    const drawnOn = refund.drawnOn || null;
+    const drawnAs = refund.drawnAs || null;
+    const mode = refund.mode || "Cash";
+    const referenceNo = refund.referenceNo || null;
+    const refundNo =
+      refund.refundReceiptNo || `F-${String(id).padStart(4, "0")}`;
+
+    const chequeDate = refund.chequeDate || null;
+    const chequeNumber = refund.chequeNumber || null;
+    const bankName = refund.bankName || null;
+    const transferType = refund.transferType || null;
+    const transferDate = refund.transferDate || null;
+    const upiName = refund.upiName || null;
+    const upiId = refund.upiId || null;
+    const upiDate = refund.upiDate || null;
+
+    // ---------- CLINIC PROFILE ----------
+    const profile = await getClinicProfile({ force: true });
+    const clinicName = profileValue(profile, "clinicName");
+    const clinicAddress = profileValue(profile, "address");
+    const clinicPAN = profileValue(profile, "pan");
+    const clinicRegNo = profileValue(profile, "regNo");
+    const doctor1Name = profileValue(profile, "doctor1Name");
+    const doctor1RegNo = profileValue(profile, "doctor1RegNo");
+    const doctor2Name = profileValue(profile, "doctor2Name");
+    const doctor2RegNo = profileValue(profile, "doctor2RegNo");
+    const clinicRepresentative = profileValue(profile, "clinicRepresentative");
+
+    // ---------- PDF HEADERS ----------
+    res.setHeader("Content-Type", "application/pdf");
+    res.setHeader(
+      "Content-Disposition",
+      `inline; filename="refund-${id}.pdf"`
+    );
+
+    const doc = new PDFDocument({
+      size: "A4",
+      margin: 36,
+    });
+
+    doc.pipe(res);
+
+    const pageWidth = doc.page.width;
+    const usableWidth = pageWidth - 72;
+    let y = 40;
+
+    const logoLeftPath = path.join(__dirname, "resources", "logo-left.png");
+    const logoRightPath = path.join(__dirname, "resources", "logo-right.png");
+
+    const leftLogoX = 36;
+    const rightLogoX = pageWidth - 36;
+
+    // HEADER
+    try {
+      doc.image(logoLeftPath, leftLogoX, y, { width: 32, height: 32 });
+    } catch (e) {}
+    try {
+      doc.image(logoRightPath, rightLogoX - 32, y, { width: 32, height: 32 });
+    } catch (e) {}
+
+    doc
+      .font("Helvetica-Bold")
+      .fontSize(13)
+      .text(clinicName || "", 0, y + 2, {
+        align: "center",
+        width: pageWidth,
+      });
+
+    doc
+      .font("Helvetica")
+      .fontSize(9)
+      .text(clinicAddress || "", 0, y + 20, {
+        align: "center",
+        width: pageWidth,
+      })
+      .text(
+        (clinicPAN ? `PAN: ${clinicPAN}` : "") +
+          (clinicPAN && clinicRegNo ? "   |   " : "") +
+          (clinicRegNo ? `Reg. No.: ${clinicRegNo}` : ""),
+        {
+          align: "center",
+          width: pageWidth,
+        }
+      );
+
+    y += 48;
+
+    doc.moveTo(36, y).lineTo(pageWidth - 36, y).stroke();
+    y += 6;
+
+    // DOCTOR LINE
+    doc.font("Helvetica-Bold").fontSize(9);
+    doc.text(doctor1Name || "", 36, y);
+    doc.text(doctor2Name || "", pageWidth / 2, y, {
+      align: "right",
+      width: usableWidth / 2,
+    });
+
+    y += 12;
+    doc.font("Helvetica").fontSize(8);
+    doc.text(doctor1RegNo ? `Reg. No.: ${doctor1RegNo}` : "", 36, y);
+    doc.text(
+      doctor2RegNo ? `Reg. No.: ${doctor2RegNo}` : "",
+      pageWidth / 2,
+      y,
+      {
+        align: "right",
+        width: usableWidth / 2,
+      }
+    );
+
+    y += 16;
+
+    // TITLE BAR
+    doc
+      .save()
+      .rect(36, y, usableWidth, 18)
+      .fill("#F3F3F3")
+      .restore()
+      .rect(36, y, usableWidth, 18)
+      .stroke();
+
+    doc.font("Helvetica-Bold").fontSize(10).text("REFUND RECEIPT", 36, y + 4, {
+      align: "center",
+      width: usableWidth,
+    });
+
+    y += 26;
+
+    // COMMON LAYOUT
+    const leftX = 36;
+    const rightBoxWidth = 180;
+    const rightX = pageWidth - 36 - rightBoxWidth;
+
+    doc.font("Helvetica").fontSize(9);
+    doc.text(`Refund No.: ${refundNo}`, leftX, y);
+    doc.text(`Date: ${formatDateDot(refund.refundDate || "")}`, rightX, y, {
+      width: rightBoxWidth,
+      align: "right",
+    });
+
+    y += 16;
+
+    const detailsTopY = y;
+    const leftWidth = rightX - leftX - 10;
+
+    doc
+      .font("Helvetica-Bold")
+      .text(`Patient Name: ${patientName}`, leftX, detailsTopY, {
+        width: leftWidth,
+      });
+    doc.font("Helvetica").text(`Address: ${address}`, leftX, doc.y + 3, {
+      width: leftWidth,
+    });
+
+    let detailsY = doc.y + 4;
+    doc.font("Helvetica");
+
+    const addDetailR = (label, value) => {
+      if (!value) return;
+      doc.text(`${label} ${value}`, leftX, detailsY, { width: leftWidth });
+      detailsY = doc.y + 3;
+    };
+
+    addDetailR("Amount Refunded: Rs", formatMoney(refund.amount));
+    addDetailR("Refund Mode:", mode);
+    addDetailR("Reference No.:", referenceNo);
+    addDetailR("Drawn On:", drawnOn);
+    addDetailR("Drawn As:", drawnAs);
+    addDetailR("Cheque No.:", chequeNumber);
+    addDetailR("Cheque Date:", formatDateDot(chequeDate));
+    addDetailR("Bank:", bankName);
+    addDetailR("Transfer Type:", transferType);
+    addDetailR("Transfer Date:", formatDateDot(transferDate));
+    addDetailR("UPI ID:", upiId);
+    addDetailR("UPI Name:", upiName);
+    addDetailR("UPI Date:", formatDateDot(upiDate));
+
+    // RIGHT BILL SUMMARY
+    const boxY = detailsTopY;
+    const lineH = 12;
+    const boxHeight = 100;
+
+    doc.rect(rightX, boxY, rightBoxWidth, boxHeight).stroke();
+
+    let by2 = boxY + 4;
+    doc.font("Helvetica-Bold").fontSize(9).text("Bill Summary", rightX + 6, by2);
+    by2 += lineH + 2;
+    doc.font("Helvetica").fontSize(9);
+
+    const billNoText2 = bill.invoiceNo || billId;
+
+    const addRow2 = (label, value) => {
+      doc.text(label, rightX + 6, by2);
+      doc.text(value, rightX + 6, by2, {
+        width: rightBoxWidth - 12,
+        align: "right",
+      });
+      by2 += lineH;
+    };
+
+    addRow2("Bill No.:", billNoText2);
+    addRow2("Bill Date:", formatDateDot(bill.date || ""));
+    addRow2("Bill Total:", `Rs ${formatMoney(billTotal)}`);
+    addRow2("Total Paid:", `Rs ${formatMoney(netPaidTillThis)}`);
+    //addRow2("Refunded (incl. this):", `Rs ${formatMoney(refundedTillThis)}`);
+    addRow2("Refunded (incl. this):", `Rs ${formatMoney(refund.amount)}`);
+    addRow2("Balance:", `Rs ${formatMoney(balanceAfterThis)}`);
+
+    // FOOTNOTE + SIGNATURES
+    y = Math.max(detailsY + 6, boxY + boxHeight + 6);
+
+    doc
+      .font("Helvetica")
+      .fontSize(8)
+      .text("* Dispute if any subject to Jamshedpur Jurisdiction", leftX, y, {
+        width: usableWidth,
+      });
+
+    const sigY = y + 24;
+    const sigWidth = 160;
+
+    const rightSigX = pageWidth - 36 - sigWidth;
+    doc
+      .moveTo(rightSigX, sigY)
+      .lineTo(rightSigX + sigWidth, sigY)
+      .dash(1, { space: 2 })
+      .stroke()
+      .undash();
+    doc.fontSize(8).text(clinicRepresentative || "", rightSigX, sigY + 4, {
+      width: sigWidth,
+      align: "center",
+    });
+
+    doc.end();
+  } catch (err) {
+    console.error("refund-html-pdf error:", err);
+    if (!res.headersSent) {
+      res.status(500).json({ error: "Failed to generate refund PDF" });
+    }
+  }
+});
+
+
+app.get("/api/bills/:id/full-payment-pdf", async (req, res) => {
+  const id = req.params.id;
+  if (!id) return res.status(400).json({ error: "Invalid bill id" });
+
+  function formatMoney(v) {
+    return Number(v || 0).toFixed(2);
+  }
+
+  function formatDateOnly(dtString) {
+    return typeof formatDateDot === "function"
+      ? formatDateDot(dtString)
+      : dtString || "";
+  }
+
+  try {
+    // ---------- LOAD BILL ----------
+    const billRef = db.collection("bills").doc(id);
+    const billSnap = await billRef.get();
+    if (!billSnap.exists)
+      return res.status(404).json({ error: "Bill not found" });
+    const bill = billSnap.data();
+
+    // fetch items (legacy/new combined)
+    const itemsSnap = await db
+      .collection("items")
+      .where("billId", "==", id)
+      .get();
+    const legacyItems = itemsSnap.docs.map((d) => {
+      const dd = d.data();
+      return {
+        id: d.id,
+        description: dd.description || dd.item || dd.details || "",
+        qty: Number(dd.qty || 0),
+        rate: Number(dd.rate || 0),
+        amount:
+          dd.amount != null
+            ? Number(dd.amount)
+            : Number(dd.qty || 0) * Number(dd.rate || 0),
+      };
+    });
+
+    const serviceItems = Array.isArray(bill.services)
+      ? bill.services.map((s, idx) => {
+          const qty = Number(s.qty || 0);
+          const rate = Number(s.rate || 0);
+          const amount = s.amount != null ? Number(s.amount) : qty * rate;
+          const parts = [];
+          if (s.item) parts.push(s.item);
+          if (s.details) parts.push(s.details);
+          return {
+            id: `svc-${idx + 1}`,
+            description: parts.join(" - "),
+            qty,
+            rate,
+            amount,
+          };
+        })
+      : [];
+    const items = serviceItems.length > 0 ? serviceItems : legacyItems;
+
+    // payments & refunds
+    const paysSnap = await db
+      .collection("payments")
+      .where("billId", "==", id)
+      .get();
+    const payments = paysSnap.docs.map((d) => {
+      const pd = d.data();
+      return {
+        id: d.id,
+        type: "Payment",
+        paymentDateTime:
+          pd.paymentDateTime ||
+          (pd.paymentDate
+            ? `${pd.paymentDate}T${pd.paymentTime || "00:00"}:00.000Z`
+            : null),
+        paymentDate: pd.paymentDate || null,
+        paymentTime: pd.paymentTime || null,
+        amount: Number(pd.amount || 0),
+        mode: pd.mode || "",
+        referenceNo: pd.referenceNo || "",
+        chequeDate: pd.chequeDate || null,
+        chequeNumber: pd.chequeNumber || null,
+        bankName: pd.bankName || null,
+        transferType: pd.transferType || null,
+        transferDate: pd.transferDate || null,
+        upiName: pd.upiName || null,
+        upiId: pd.upiId || null,
+        upiDate: pd.upiDate || null,
+        drawnOn: pd.drawnOn || null,
+        drawnAs: pd.drawnAs || null,
+        receiptNo: pd.receiptNo || d.id,
+      };
+    });
+
+    const refundsSnap = await db
+      .collection("refunds")
+      .where("billId", "==", id)
+      .get();
+    const refunds = refundsSnap.docs.map((d) => {
+      const rd = d.data();
+      return {
+        id: d.id,
+        type: "Refund",
+        paymentDateTime:
+          rd.refundDateTime ||
+          (rd.refundDate
+            ? `${rd.refundDate}T${rd.refundTime || "00:00"}:00.000Z`
+            : null),
+        paymentDate: rd.refundDate || null,
+        paymentTime: rd.refundTime || null,
+        amount: Number(rd.amount || 0),
+        mode: rd.mode || "",
+        referenceNo: rd.referenceNo || "",
+        chequeDate: rd.chequeDate || null,
+        chequeNumber: rd.chequeNumber || null,
+        bankName: rd.bankName || null,
+        transferType: rd.transferType || null,
+        transferDate: rd.transferDate || null,
+        upiName: rd.upiName || null,
+        upiId: rd.upiId || null,
+        upiDate: rd.upiDate || null,
+        receiptNo: rd.refundNo || d.id,
+      };
+    });
+
+    // Combine payments and refunds, then sort chronologically
+    const allTransactions = [...payments, ...refunds];
+    allTransactions.sort((a, b) => {
+      const da = a.paymentDateTime ? new Date(a.paymentDateTime) : new Date(0);
+      const dbb = b.paymentDateTime ? new Date(b.paymentDateTime) : new Date(0);
+      return da - dbb;
+    });
+
+    // totals
+    const total = Number(
+      bill.total || items.reduce((s, it) => s + Number(it.amount || 0), 0)
+    );
+    const totalPaidGross = payments.reduce(
+      (s, p) => s + Number(p.amount || 0),
+      0
+    );
+    const totalRefunded = refunds.reduce(
+      (s, r) => s + Number(r.amount || 0),
+      0
+    );
+    const netPaid = totalPaidGross - totalRefunded;
+    const balance = total - netPaid;
+
+    // Only allow full-payment PDF if balance is zero (or less)
+    // if (balance > 0) {
+    //   return res.status(400).json({
+    //     error:
+    //       "Bill not fully paid - full payment PDF is available only after full payment",
+    //   });
+    // }
+
+    // ---------- FETCH CLINIC PROFILE ----------
+    const profile = await getClinicProfile({ force: true });
+    const clinicName = profileValue(profile, "clinicName");
+    const clinicAddress = profileValue(profile, "address");
+    const clinicPAN = profileValue(profile, "pan");
+    const clinicRegNo = profileValue(profile, "regNo");
+    const doctor1Name = profileValue(profile, "doctor1Name");
+    const doctor1RegNo = profileValue(profile, "doctor1RegNo");
+    const doctor2Name = profileValue(profile, "doctor2Name");
+    const doctor2RegNo = profileValue(profile, "doctor2RegNo");
+    const patientRepresentative = profileValue(
+      profile,
+      "patientRepresentative"
+    );
+    const clinicRepresentative = profileValue(profile, "clinicRepresentative");
+
+    // --- PDF Setup ---
+    res.setHeader("Content-Type", "application/pdf");
+    res.setHeader(
+      "Content-Disposition",
+      `inline; filename="full-payment-${id}.pdf"`
+    );
+
+    const doc = new PDFDocument({ size: "A4", margin: 0 });
+    doc.pipe(res);
+
+    const pageMargin = 15;
+    const borderPadding = 20;
+
+    function computeContentArea() {
+      const pw = doc.page.width;
+      const ph = doc.page.height;
+      const contentLeft = pageMargin + borderPadding;
+      const contentTop = pageMargin + borderPadding;
+      const contentRight = pw - (pageMargin + borderPadding);
+      const contentBottom = ph - (pageMargin + borderPadding);
+      const usableWidth = contentRight - contentLeft;
+      const usableHeight = contentBottom - contentTop;
+      return {
+        contentLeft,
+        contentTop,
+        contentRight,
+        contentBottom,
+        usableWidth,
+        usableHeight,
+      };
+    }
+
+    function drawPageBorder() {
+      try {
+        const pw = doc.page.width;
+        const ph = doc.page.height;
+        doc.save();
+        doc.lineWidth(0.8);
+        doc
+          .rect(
+            pageMargin,
+            pageMargin,
+            pw - pageMargin * 2,
+            ph - pageMargin * 2
+          )
+          .stroke();
+        doc.restore();
+      } catch (e) {
+        /* ignore */
+      }
+    }
+
+    // fonts
+    try {
+      const workSansPath = path.join(
+        __dirname,
+        "resources",
+        "WorkSans-Regular.ttf"
+      );
+      if (fs && fs.existsSync(workSansPath)) {
+        doc.registerFont("WorkSans", workSansPath);
+        doc.font("WorkSans");
+      } else {
+        doc.font("Helvetica");
+      }
+    } catch (e) {
+      doc.font("Helvetica");
+    }
+
+    // initial
+    drawPageBorder();
+    let { contentLeft, contentTop, contentRight, usableWidth } =
+      computeContentArea();
+    let y = contentTop;
+
+    const logoLeftPath = path.join(__dirname, "resources", "logo-left.png");
+    const logoRightPath = path.join(__dirname, "resources", "logo-right.png");
+
+    function drawPageHeader() {
+      const ca = computeContentArea();
+      contentLeft = ca.contentLeft;
+      contentTop = ca.contentTop;
+      contentRight = ca.contentRight;
+      usableWidth = ca.usableWidth;
+
+      const logoW = 40;
+      const logoH = 40;
+      try {
+        if (fs && fs.existsSync(logoLeftPath))
+          doc.image(logoLeftPath, contentLeft, y, {
+            width: logoW,
+            height: logoH,
+          });
+      } catch (e) {}
+      try {
+        if (fs && fs.existsSync(logoRightPath))
+          doc.image(logoRightPath, contentRight - logoW, y, {
+            width: logoW,
+            height: logoH,
+          });
+      } catch (e) {}
+
+      doc
+        .fontSize(14)
+        .font("Helvetica-Bold")
+        .text(clinicName || "", contentLeft, y + 6, {
+          width: usableWidth,
+          align: "center",
+        });
+      doc
+        .fontSize(9)
+        .font("Helvetica")
+        .text(clinicAddress || "", contentLeft, y + 26, {
+          width: usableWidth,
+          align: "center",
+        });
+      doc.text(
+        `PAN : ${clinicPAN || ""}   |   Reg. No: ${clinicRegNo || ""}`,
+        contentLeft,
+        y + 40,
+        { width: usableWidth, align: "center" }
+      );
+
+      y += 56;
+      doc.moveTo(contentLeft, y).lineTo(contentRight, y).stroke();
+      y += 8;
+    }
+
+    drawPageHeader();
+
+    // --- doctors, invoice title, patient info ---
+    doc.fontSize(9).font("Helvetica-Bold");
+    doc.text(doctor1Name || "", contentLeft, y);
+    doc.text(doctor2Name || "", contentLeft, y, {
+      width: usableWidth,
+      align: "right",
+    });
+    y += 12;
+    doc.font("Helvetica").fontSize(8);
+    doc.text(doctor1RegNo ? `Reg. No.: ${doctor1RegNo}` : "", contentLeft, y);
+    doc.text(doctor2RegNo ? `Reg. No.: ${doctor2RegNo}` : "", contentLeft, y, {
+      width: usableWidth,
+      align: "right",
+    });
+    y += 18;
+
+    doc
+      .fontSize(10)
+      .font("Helvetica-Bold")
+      .rect(contentLeft, y, usableWidth, 18)
+      .stroke();
+    doc.text("INVOICE CUM PAYMENT RECEIPT", contentLeft, y + 4, {
+      width: usableWidth,
+      align: "center",
+    });
+    y += 28;
+
+    const invoiceNo = bill.invoiceNo || id;
+    const dateText = formatDateOnly(bill.date || "");
+    doc.fontSize(9).font("Helvetica-Bold");
+    doc.text(`Invoice No.: ${invoiceNo}`, contentLeft, y);
+    doc.text(`Date: ${dateText}`, contentLeft, y, {
+      width: usableWidth,
+      align: "right",
+    });
+    y += 14;
+
+    // Patient info
+    const patientName = bill.patientName || "";
+    const sexText = bill.sex ? String(bill.sex) : "";
+    const ageText =
+      bill.age != null && bill.age !== "" ? `${bill.age} Years` : "";
+    const addressText = bill.address || "";
+    const procedureText = bill.procedureDone || "";
+
+    doc
+      .font("Helvetica-Bold")
+      .text(`Patient Name: ${patientName}`, contentLeft, y);
+    y += 14;
+
+    doc.font("Helvetica");
+    if (sexText) {
+      doc.text(
+        `Address: ${addressText || "____________________"}`,
+        contentLeft,
+        y,
+        {
+          width: usableWidth * 0.6,
+        }
+      );
+      y += 20;
+    } else {
+      doc.text(
+        `Address: ${addressText || "____________________"}`,
+        contentLeft,
+        y,
+        {
+          width: usableWidth,
+        }
+      );
+      y += 20;
+    }
+
+    // Procedure Done
+    doc
+      .fontSize(9)
+      .font("Helvetica")
+      .text(
+        `Procedure Done :- ${procedureText || "____________________"}`,
+        contentLeft,
+        y
+      );
+
+    y += 14;
+
+    // ---------- SERVICES / ITEMS TABLE ----------
+    const tableLeft = contentLeft;
+    const colSrW = 24;
+    const colQtyW = 48;
+    const colRateW = 70;
+    const colSubW = 80;
+    const colServiceW = usableWidth - (colSrW + colQtyW + colRateW + colSubW);
+    const colSrX = tableLeft;
+    const colServiceX = colSrX + colSrW;
+    const colQtyX = colServiceX + colServiceW;
+    const colRateX = colQtyX + colQtyW;
+    const colSubX = colRateX + colRateW;
+    const tableRightX = tableLeft + usableWidth;
+
+    const headerHeight = 14;
+    const headerPadding = 3;
+    const headerDrawH = headerHeight + headerPadding * 2;
+    const minRowH = 18;
+    const minTableHeight = 180;
+    const bottomSafety = 100;
+
+    function drawVerticalsForItemsBlock(yTop, height) {
+      const xs = [colSrX, colServiceX, colQtyX, colRateX, colSubX, tableRightX];
+      xs.forEach((x) => {
+        doc
+          .moveTo(x, yTop)
+          .lineTo(x, yTop + height)
+          .stroke();
+      });
+    }
+
+    let tableStartY = y;
+
+    // header background + text
+    doc
+      .save()
+      .rect(tableLeft, y, usableWidth, headerDrawH)
+      .fill("#F3F3F3")
+      .restore();
+    doc.font("Helvetica-Bold").fontSize(9);
+    const headerTextYOffset = headerPadding + 3;
+    doc.text("Sr.", colSrX , y + headerTextYOffset, {
+      width: colSrW,
+      align: "center",
+    });
+    doc.text(
+      "Description of Items / Services",
+      colServiceX + 4,
+      y + headerTextYOffset,
+      { width: colServiceW - 8,
+        align: "center"
+       }
+    );
+    doc.text("Qty", colQtyX, y + headerTextYOffset,{
+      width: colQtyW,
+      align: "center",
+    });
+    doc.text("Rate", colRateX + 4, y + headerTextYOffset, {
+      width: colRateW - 8,
+      align: "center",
+    });
+    doc.text("Amount", colSubX + 4, y + headerTextYOffset, {
+      width: colSubW - 8,
+      align: "center",
+    });
+
+    y += headerDrawH;
+    doc.moveTo(tableLeft, y).lineTo(tableRightX, y).stroke();
+
+    // render items
+    doc.font("Helvetica").fontSize(10);
+    let filledHeight = 0;
+    for (let i = 0; i < items.length; i++) {
+      const it = items[i];
+
+      const descH = doc.heightOfString(it.description || "", {
+        width: colServiceW - 8,
+      });
+      const qtyH = doc.heightOfString(String(it.qty || ""), {
+        width: colQtyW - 8,
+      });
+      const rateH = doc.heightOfString(formatMoney(it.rate || 0), {
+        width: colRateW - 8,
+      });
+      const amtH = doc.heightOfString(formatMoney(it.amount || 0), {
+        width: colSubW - 8,
+      });
+
+      const contentMaxH = Math.max(descH, qtyH, rateH, amtH);
+      const thisRowH = Math.max(minRowH, contentMaxH + 6);
+
+      // page-break check
+      if (y + thisRowH > doc.page.height - bottomSafety) {
+        const visualHeightSoFar = headerDrawH + filledHeight;
+        if (visualHeightSoFar > 0) {
+          drawVerticalsForItemsBlock(tableStartY, visualHeightSoFar);
+          doc
+            .rect(tableLeft, tableStartY, usableWidth, visualHeightSoFar)
+            .stroke();
+        }
+
+        doc.addPage();
+        drawPageBorder();
+        ({ contentLeft, contentTop, contentRight, usableWidth } =
+          computeContentArea());
+        y = contentTop;
+
+        drawPageHeader();
+
+        doc
+          .fontSize(10)
+          .font("Helvetica-Bold")
+          .rect(contentLeft, y, usableWidth, 18)
+          .stroke();
+        doc.text("INVOICE CUM PAYMENT RECEIPT", contentLeft, y + 4, {
+          width: usableWidth,
+          align: "center",
+        });
+        y += 28;
+
+        tableStartY = y;
+        doc
+          .save()
+          .rect(tableLeft, y, usableWidth, headerDrawH)
+          .fill("#F3F3F3")
+          .restore();
+        doc.font("Helvetica-Bold").fontSize(9);
+        doc.text("Sr.", colSrX + 4, y + headerTextYOffset);
+        doc.text(
+          "Description of Items / Services",
+          colServiceX + 4,
+          y + headerTextYOffset,
+          { width: colServiceW - 8 }
+        );
+        doc.text("Qty", colQtyX + 4, y + headerTextYOffset);
+        doc.text("Rate", colRateX + 4, y + headerTextYOffset, {
+          width: colRateW - 8,
+          align: "right",
+        });
+        doc.text("Amount", colSubX + 4, y + headerTextYOffset, {
+          width: colSubW - 8,
+          align: "right",
+        });
+        y += headerDrawH;
+        doc.moveTo(tableLeft, y).lineTo(tableRightX, y).stroke();
+
+        filledHeight = 0;
+      }
+
+      const descH2 = doc.heightOfString(it.description || "", {
+        width: colServiceW - 8,
+      });
+      const qtyH2 = doc.heightOfString(String(it.qty || ""), {
+        width: colQtyW - 8,
+      });
+      const rateH2 = doc.heightOfString(formatMoney(it.rate || 0), {
+        width: colRateW - 8,
+      });
+      const amtH2 = doc.heightOfString(formatMoney(it.amount || 0), {
+        width: colSubW - 8,
+      });
+      const actualRowH = Math.max(
+        minRowH,
+        Math.max(descH2, qtyH2, rateH2, amtH2) + 6
+      );
+
+      const rowTop = y;
+      const descY = rowTop + (actualRowH - descH2) / 2;
+      const qtyY = rowTop + (actualRowH - qtyH2) / 2;
+      const rateY = rowTop + (actualRowH - rateH2) / 2;
+      const amtY = rowTop + (actualRowH - amtH2) / 2;
+
+      doc.text(String(i + 1), colSrX + 4, rowTop + 3);
+      doc.text(it.description || "", colServiceX + 4, descY, {
+        width: colServiceW - 8,
+      });
+      doc.text(
+        String(it.qty != null && it.qty !== "" ? it.qty : ""),
+        colQtyX + 4,
+        qtyY,
+        { width: colQtyW - 8, align: "left" }
+      );
+      doc.text(formatMoney(it.rate || 0), colRateX + 4, rateY, {
+        width: colRateW - 8,
+        align: "right",
+      });
+      doc.text(formatMoney(it.amount || 0), colSubX + 4, amtY, {
+        width: colSubW - 8,
+        align: "right",
+      });
+
+      y += actualRowH;
+      filledHeight += actualRowH;
+    }
+
+    // ensure minimum visual height of the items block (filler rows)
+    let totalTableHeight = filledHeight;
+    if (totalTableHeight < minTableHeight) {
+      let needed = minTableHeight - totalTableHeight;
+      const fillerRows = Math.ceil(needed / minRowH);
+      for (let fr = 0; fr < fillerRows; fr++) {
+        if (y + minRowH > doc.page.height - bottomSafety) {
+          drawVerticalsForItemsBlock(
+            tableStartY,
+            headerDrawH + totalTableHeight
+          );
+          doc
+            .rect(
+              tableLeft,
+              tableStartY,
+              usableWidth,
+              headerDrawH + totalTableHeight
+            )
+            .stroke();
+
+          doc.addPage();
+          drawPageBorder();
+          ({ contentLeft, contentTop, contentRight, usableWidth } =
+            computeContentArea());
+          y = contentTop;
+
+          drawPageHeader();
+          doc
+            .fontSize(10)
+            .font("Helvetica-Bold")
+            .rect(contentLeft, y, usableWidth, 18)
+            .stroke();
+          doc.text("INVOICE CUM PAYMENT RECEIPT", contentLeft, y + 4, {
+            width: usableWidth,
+            align: "center",
+          });
+          y += 28;
+
+          tableStartY = y;
+          doc
+            .save()
+            .rect(tableLeft, y, usableWidth, headerDrawH)
+            .fill("#F3F3F3")
+            .restore();
+          doc.font("Helvetica-Bold").fontSize(9);
+          doc.text("Sr.", colSrX + 4, y + headerTextYOffset);
+          doc.text(
+            "Description of Items / Services",
+            colServiceX + 4,
+            y + headerTextYOffset,
+            { width: colServiceW - 8 }
+          );
+          doc.text("Qty", colQtyX + 4, y + headerTextYOffset);
+          doc.text("Rate", colRateX + 4, y + headerTextYOffset, {
+            width: colRateW - 8,
+            align: "right",
+          });
+          doc.text("Amount", colSubX + 4, y + headerTextYOffset, {
+            width: colSubW - 8,
+            align: "right",
+          });
+          y += headerDrawH;
+          doc.moveTo(tableLeft, y).lineTo(tableRightX, y).stroke();
+
+          totalTableHeight = 0;
+        }
+
+        y += minRowH;
+        totalTableHeight += minRowH;
+      }
+      filledHeight = totalTableHeight;
+    }
+
+    // draw vertical separators spanning header + content
+    const visualTableHeight = headerDrawH + filledHeight;
+    drawVerticalsForItemsBlock(tableStartY, visualTableHeight);
+    doc.rect(tableLeft, tableStartY, usableWidth, visualTableHeight).stroke();
+
+    // ===== Net Paid box after items =====
+    const netBoxW = 120;
+    const netBoxH = 28;
+    const netBoxX = tableRightX - netBoxW;
+    let netBoxY = tableStartY + visualTableHeight;
+
+    if (netBoxY + netBoxH + 60 > doc.page.height) {
+      doc.addPage();
+      drawPageBorder();
+      ({ contentLeft, contentTop, contentRight, usableWidth } =
+        computeContentArea());
+      y = contentTop;
+      drawPageHeader();
+      netBoxY = contentTop + 54;
+    }
+
+    doc.rect(netBoxX, netBoxY, netBoxW, netBoxH).stroke();
+    doc
+      .font("Helvetica-Bold")
+      .fontSize(9)
+      .text("Total", netBoxX + 6, netBoxY + 6, {
+        width: netBoxW - 12,
+        align: "left",
+      });
+    doc
+      .font("Helvetica")
+      .fontSize(9)
+      .text(`Rs ${formatMoney(netPaid)}`, netBoxX + 6, netBoxY + 6, {
+        width: netBoxW - 12,
+        align: "right",
+      });
+
+    if (netBoxY === tableStartY + visualTableHeight) {
+      y = netBoxY + netBoxH + 8;
+    } else {
+      y = netBoxY + netBoxH + 12;
+    }
+
+    // ---------- PAYMENT DETAILS HEADING ----------
+    doc.moveDown(0.2);
+    doc
+      .fontSize(10)
+      .font("Helvetica-Bold")
+      .text("Payment Details", contentLeft, y);
+    y += 16;
+
+    // ---------- PAYMENT DETAILS TABLE (with Type column added) ----------
+    const pTableLeft = contentLeft;
+
+    const pColDateW = 60;
+    const pColRecW = 100;
+    const pColTypeW = 50;
+    const pColModeW = 50;
+    const pColBankW = 100;
+    const pColRefW = 110;
+    const pColAmtW =
+      usableWidth -
+      (pColDateW + pColRecW + pColTypeW + pColModeW + pColBankW + pColRefW);
+
+    const pColDateX = pTableLeft;
+    const pColRecX = pColDateX + pColDateW;
+    const pColTypeX = pColRecX + pColRecW;
+    const pColModeX = pColTypeX + pColTypeW;
+    const pColBankX = pColModeX + pColModeW;
+    const pColRefX = pColBankX + pColBankW;
+    const pColAmtX = pColRefX + pColRefW;
+    const pTableRightX = pTableLeft + usableWidth;
+
+    const pHeaderH = 14;
+    const pHeaderDrawH = pHeaderH + headerPadding * 2;
+    const pMinRowH = 12;
+    const pMinTableH = 90;
+    const pBottomSafety = 100;
+
+    function drawVerticalsForPaymentsBlock(yTop, height) {
+      const xs = [
+        pColDateX,
+        pColRecX,
+        pColTypeX,
+        pColModeX,
+        pColBankX,
+        pColRefX,
+        pColAmtX,
+        pTableRightX,
+      ];
+      xs.forEach((x) => {
+        doc
+          .moveTo(x, yTop)
+          .lineTo(x, yTop + height)
+          .stroke();
+      });
+    }
+
+    // payments table header placement
+    let pTableStartY = y;
+    doc
+      .save()
+      .rect(pTableLeft, y, usableWidth, pHeaderDrawH)
+      .fill("#F3F3F3")
+      .restore();
+    doc.font("Helvetica-Bold").fontSize(9);
+    const pHeaderTextYOffset = headerPadding + 3;
+
+    doc.text("Date", pColDateX + 4, y + pHeaderTextYOffset, {
+      width: pColDateW - 4,
+      align: "center",
+    });
+    doc.text("Receipt / Refund No.", pColRecX + 4, y + pHeaderTextYOffset, {
+      width: pColRecW - 8,
+      align: "center",
+    });
+    doc.text("Type", pColTypeX, y + pHeaderTextYOffset, {
+      width: pColTypeW - 4,
+      align: "center",
+    });
+    doc.text("Mode", pColModeX , y + pHeaderTextYOffset, {
+      width: pColModeW - 4,
+      align: "center",
+    });
+    doc.text("Bank Name / UPI ID", pColBankX, y + pHeaderTextYOffset, {
+      width: pColBankW - 4,
+      align: "center",
+    });
+    doc.text("Reference / Cheque No.", pColRefX , y + pHeaderTextYOffset, {
+      width: pColRefW - 4,
+      align: "center",
+    });
+    doc.text("Amount", pColAmtX + 4, y + pHeaderTextYOffset, {
+      width: pColAmtW - 4,
+      align: "center",
+
+    });
+
+    y += pHeaderDrawH;
+    doc.moveTo(pTableLeft, y).lineTo(pTableRightX, y).stroke();
+
+    // render payments and refunds rows
+    doc.font("Helvetica").fontSize(9);
+    let pFilledHeight = 0;
+    for (let i = 0; i < allTransactions.length; i++) {
+      const p = allTransactions[i];
+
+      const dateText = formatDateOnly(p.paymentDate || "");
+      const receiptText = p.receiptNo || p.id || "";
+      const typeText = p.type || "Payment";
+      
+      let modeText = p.mode || "-";
+      if (
+        (modeText === "BankTransfer" ||
+          (modeText && modeText.toLowerCase().includes("bank"))) &&
+        p.transferType
+      ) {
+        modeText = `Bank (${p.transferType})`;
+      }
+      
+      let bankText = "-";
+      let refText = "-";
+
+      if (p.mode === "Cheque") {
+        refText = p.chequeNumber || p.referenceNo || "-";
+        bankText = p.bankName || "-";
+      } else if (p.mode === "UPI") {
+        bankText = p.upiId || "-";
+        refText = p.referenceNo || "-";
+      } else {
+        bankText = p.bankName || "-";
+        refText = p.referenceNo || "-";
+      }
+
+      const amtText = formatMoney(p.amount || 0);
+
+      const dH = doc.heightOfString(dateText, { width: pColDateW - 8 });
+      const rH = doc.heightOfString(receiptText, { width: pColRecW - 8 });
+      const tH = doc.heightOfString(typeText, { width: pColTypeW - 8 });
+      const mH = doc.heightOfString(modeText, { width: pColModeW - 8 });
+      const bH = doc.heightOfString(bankText, { width: pColBankW - 8 });
+      const refH = doc.heightOfString(refText, { width: pColRefW - 8 });
+      const aH = doc.heightOfString(amtText, { width: pColAmtW - 8 });
+
+      const maxH = Math.max(dH, rH, tH, mH, bH, refH, aH);
+      const thisRowH = Math.max(pMinRowH, maxH + 6);
+
+      // page-break check
+      if (y + thisRowH > doc.page.height - pBottomSafety) {
+        const paymentsVisualHeightSoFar = pHeaderDrawH + pFilledHeight;
+        if (paymentsVisualHeightSoFar > 0) {
+          drawVerticalsForPaymentsBlock(pTableStartY, paymentsVisualHeightSoFar);
+          doc
+            .rect(
+              pTableLeft,
+              pTableStartY,
+              usableWidth,
+              paymentsVisualHeightSoFar
+            )
+            .stroke();
+        }
+
+        doc.addPage();
+        drawPageBorder();
+        ({ contentLeft, contentTop, contentRight, usableWidth } =
+          computeContentArea());
+        y = contentTop;
+
+        drawPageHeader();
+
+        pTableStartY = y;
+        doc
+          .save()
+          .rect(pTableLeft, y, usableWidth, pHeaderDrawH)
+          .fill("#F3F3F3")
+          .restore();
+        doc.font("Helvetica-Bold").fontSize(9);
+        doc.text("Date", pColDateX + 4, y + pHeaderTextYOffset, {
+          width: pColDateW - 8,
+        });
+        doc.text("Receipt / Refund No.", pColRecX + 4, y + pHeaderTextYOffset, {
+          width: pColRecW - 8,
+        });
+        doc.text("Type", pColTypeX + 4, y + pHeaderTextYOffset, {
+          width: pColTypeW - 8,
+        });
+        doc.text("Mode", pColModeX + 4, y + pHeaderTextYOffset, {
+          width: pColModeW - 8,
+        });
+        doc.text("Bank Name / UPI ID", pColBankX + 4, y + pHeaderTextYOffset, {
+          width: pColBankW - 8,
+        });
+        doc.text("Reference / Cheque No.", pColRefX + 4, y + pHeaderTextYOffset, {
+          width: pColRefW - 8,
+        });
+        doc.text("Amount", pColAmtX + 4, y + pHeaderTextYOffset, {
+          width: pColAmtW - 8,
+          align: "right",
+        });
+        y += pHeaderDrawH;
+        doc.moveTo(pTableLeft, y).lineTo(pTableRightX, y).stroke();
+
+        pFilledHeight = 0;
+      }
+
+      // draw cells
+      const rowTop = y;
+      const dY = rowTop + (thisRowH - dH) / 2;
+      const recY = rowTop + (thisRowH - rH) / 2;
+      const typeY = rowTop + (thisRowH - tH) / 2;
+      const modeY = rowTop + (thisRowH - mH) / 2;
+      const bankY = rowTop + (thisRowH - bH) / 2;
+      const refY = rowTop + (thisRowH - refH) / 2;
+      const amtY = rowTop + (thisRowH - aH) / 2;
+
+      doc.text(dateText, pColDateX + 4, dY, {
+        width: pColDateW - 8,
+      });
+      doc.text(receiptText, pColRecX + 4, recY, {
+        width: pColRecW - 8,
+      });
+      doc.text(typeText, pColTypeX + 4, typeY, {
+        width: pColTypeW - 8,
+      });
+      doc.text(modeText, pColModeX + 4, modeY, {
+        width: pColModeW - 8,
+      });
+      doc.text(bankText, pColBankX + 4, bankY, {
+        width: pColBankW - 8,
+      });
+      doc.text(refText, pColRefX + 4, refY, {
+        width: pColRefW - 8,
+      });
+      doc.text(amtText, pColAmtX + 4, amtY, {
+        width: pColAmtW - 8,
+        align: "right",
+      });
+
+      y += thisRowH;
+      pFilledHeight += thisRowH;
+    }
+
+    // ensure payments block minimum visual height (filler rows)
+    if (pFilledHeight < pMinTableH) {
+      const need = pMinTableH - pFilledHeight;
+      const fillerCount = Math.ceil(need / pMinRowH);
+      for (let f = 0; f < fillerCount; f++) {
+        if (y + pMinRowH > doc.page.height - pBottomSafety) {
+          const paymentsVisualHeightSoFar = pHeaderDrawH + pFilledHeight;
+          if (paymentsVisualHeightSoFar > 0) {
+            drawVerticalsForPaymentsBlock(
+              pTableStartY,
+              paymentsVisualHeightSoFar
+            );
+            doc
+              .rect(
+                pTableLeft,
+                pTableStartY,
+                usableWidth,
+                paymentsVisualHeightSoFar
+              )
+              .stroke();
+          }
+          doc.addPage();
+          drawPageBorder();
+          ({ contentLeft, contentTop, contentRight, usableWidth } =
+            computeContentArea());
+          y = contentTop;
+
+          drawPageHeader();
+          pTableStartY = y;
+          doc
+            .save()
+            .rect(pTableLeft, y, usableWidth, pHeaderDrawH)
+            .fill("#F3F3F3")
+            .restore();
+          doc.font("Helvetica-Bold").fontSize(9);
+          doc.text("Date", pColDateX + 4, y + pHeaderTextYOffset, {
+            width: pColDateW - 8,
+          });
+          doc.text("Receipt / Refund No.", pColRecX + 4, y + pHeaderTextYOffset, {
+            width: pColRecW - 8,
+          });
+          doc.text("Type", pColTypeX + 4, y + pHeaderTextYOffset, {
+            width: pColTypeW - 8,
+          });
+          doc.text("Mode", pColModeX + 4, y + pHeaderTextYOffset, {
+            width: pColModeW - 8,
+          });
+          doc.text("Bank Name / UPI ID", pColBankX + 4, y + pHeaderTextYOffset, {
+            width: pColBankW - 8,
+          });
+          doc.text("Reference / Cheque No.", pColRefX + 4, y + pHeaderTextYOffset, {
+            width: pColRefW - 8,
+          });
+          doc.text("Amount", pColAmtX + 4, y + pHeaderTextYOffset, {
+            width: pColAmtW - 8,
+            align: "right",
+          });
+          y += pHeaderDrawH;
+          doc.moveTo(pTableLeft, y).lineTo(pTableRightX, y).stroke();
+
+          pFilledHeight = 0;
+        }
+
+        y += pMinRowH;
+        pFilledHeight += pMinRowH;
+      }
+    }
+
+    // finalize payments block visuals
+    if (pFilledHeight > 0) {
+      const paymentsVisualHeight = pHeaderDrawH + pFilledHeight;
+      drawVerticalsForPaymentsBlock(pTableStartY, paymentsVisualHeight);
+      doc
+        .rect(pTableLeft, pTableStartY, usableWidth, paymentsVisualHeight)
+        .stroke();
+      y = pTableStartY + paymentsVisualHeight + 12;
+    }
+
+    // ---------- AMOUNT IN WORDS + NOTE + TOTALS BOX ----------
+    // Function to convert number to words
+    function numberToWords(num) {
+      if (num === 0) return "Zero";
+      
+      const ones = ["", "One", "Two", "Three", "Four", "Five", "Six", "Seven", "Eight", "Nine"];
+      const tens = ["", "", "Twenty", "Thirty", "Forty", "Fifty", "Sixty", "Seventy", "Eighty", "Ninety"];
+      const teens = ["Ten", "Eleven", "Twelve", "Thirteen", "Fourteen", "Fifteen", "Sixteen", "Seventeen", "Eighteen", "Nineteen"];
+      
+      function convertLessThanThousand(n) {
+        if (n === 0) return "";
+        if (n < 10) return ones[n];
+        if (n < 20) return teens[n - 10];
+        if (n < 100) return tens[Math.floor(n / 10)] + (n % 10 !== 0 ? " " + ones[n % 10] : "");
+        return ones[Math.floor(n / 100)] + " Hundred" + (n % 100 !== 0 ? " " + convertLessThanThousand(n % 100) : "");
+      }
+      
+      if (num < 1000) return convertLessThanThousand(num);
+      if (num < 100000) {
+        const thousands = Math.floor(num / 1000);
+        const remainder = num % 1000;
+        return convertLessThanThousand(thousands) + " Thousand" + (remainder !== 0 ? " " + convertLessThanThousand(remainder) : "");
+      }
+      if (num < 10000000) {
+        const lakhs = Math.floor(num / 100000);
+        const remainder = num % 100000;
+        return convertLessThanThousand(lakhs) + " Lakh" + (remainder !== 0 ? " " + numberToWords(remainder) : "");
+      }
+      const crores = Math.floor(num / 10000000);
+      const remainder = num % 10000000;
+      return convertLessThanThousand(crores) + " Crore" + (remainder !== 0 ? " " + numberToWords(remainder) : "");
+    }
+    
+    const amountInWords = numberToWords(Math.floor(netPaid)) + " Rupees Only";
+    
+    // Add amount in words
+    doc
+      .fontSize(9)
+      .font("Helvetica-Bold")
+      .text(`Total Paid (in words): ${amountInWords}`, contentLeft, y, {
+        width: usableWidth,
+      });
+    y += 18;
+
+    const boxWidth2 = 200;
+    const noteText =
+      "* This receipt is generated by the Madhurekha Eye Care Centre. Disputes if any is subjected to Jamshedpur jurisdiction.";
+
+    const spaceForNote = usableWidth - boxWidth2 - 12;
+    const noteWidth = Math.max(120, Math.min(spaceForNote, usableWidth - 12));
+
+    doc
+      .fontSize(8)
+      .font("Helvetica")
+      .text(noteText, contentLeft, y, { width: noteWidth });
+
+    const boxX2 = contentRight - boxWidth2;
+    const boxY2 = y;
+
+    const lineH = 14;
+    const rowsCount = 3;
+    const boxHeight2 = rowsCount * lineH + 8;
+
+    if (boxY2 + boxHeight2 + 60 > doc.page.height) {
+      doc.addPage();
+      drawPageBorder();
+      ({ contentLeft, contentTop, contentRight, usableWidth } =
+        computeContentArea());
+      y = contentTop;
+      drawPageHeader();
+      
+      // Re-add amount in words on new page
+      doc
+        .fontSize(9)
+        .font("Helvetica-Bold")
+        .text(`Total Paid (in words): ${amountInWords}`, contentLeft, y, {
+          width: usableWidth,
+        });
+      y += 18;
+      
+      doc
+        .fontSize(8)
+        .font("Helvetica")
+        .text(noteText, contentLeft, y, {
+          width: Math.max(120, usableWidth - boxWidth2 - 12),
+        });
+    }
+
+    doc.rect(boxX2, boxY2, boxWidth2, boxHeight2).stroke();
+    let by = boxY2 + 6;
+    doc.font("Helvetica").fontSize(9);
+    const addRow = (label, value) => {
+      doc.text(label, boxX2 + 6, by);
+      doc.text(`Rs ${formatMoney(value)}`, boxX2 + 6, by, {
+        width: boxWidth2 - 12,
+        align: "right",
+      });
+      by += lineH;
+    };
+
+    addRow("Total Pay Bill", total);
+    addRow("Refund", totalRefunded);
+    addRow("Total Paid", netPaid);
+
+    y = Math.max(boxY2 + boxHeight2 + 20, y + 20);
+
+    // ---------- SIGNATURES ----------
+    const rightSigX = contentRight - 160;
+    doc
+      .moveTo(rightSigX, y + 28)
+      .lineTo(rightSigX + 160, y + 28)
+      .dash(1, { space: 2 })
+      .stroke()
+      .undash();
+    doc.fontSize(8).text(clinicRepresentative || "", rightSigX, y + 32, {
+      width: 160,
+      align: "center",
+    });
+
+    doc.end();
+  } catch (err) {
+    console.error("full-payment-pdf error:", err);
+    if (!res.headersSent) {
+      res.status(500).json({ error: "Failed to generate full payment PDF" });
+    } else {
+      try {
+        res.end();
+      } catch (e) {}
+    }
+  }
+});
+
+// DELETE bill + items + payments + refunds + sheet rows
+app.delete("/api/bills/:id", async (req, res) => {
+  const billId = req.params.id;
+  if (!billId) return res.status(400).json({ error: "Invalid bill id" });
+
+  try {
+    const billRef = db.collection("bills").doc(billId);
+    const billSnap = await billRef.get();
+
+    if (!billSnap.exists) {
+      return res.status(404).json({ error: "Bill not found" });
+    }
+
+    const bill = billSnap.data();
+    const invoiceNo = bill.invoiceNo || billId;
+
+    // ---- FETCH CHILD DOCUMENTS ----
+    const itemsSnap = await db
+      .collection("items")
+      .where("billId", "==", billId)
+      .get();
+    const paymentsSnap = await db
+      .collection("payments")
+      .where("billId", "==", billId)
+      .get();
+    const refundsSnap = await db
+      .collection("refunds")
+      .where("billId", "==", billId)
+      .get();
+
+    // ---- BATCH DELETE ----
+    const batch = db.batch();
+
+    batch.delete(billRef);
+
+    itemsSnap.forEach((doc) => batch.delete(doc.ref));
+    paymentsSnap.forEach((doc) => batch.delete(doc.ref));
+    refundsSnap.forEach((doc) => batch.delete(doc.ref));
+
+    await batch.commit();
+
+    // ---- CLEAR CACHE ----
+    cache.flushAll();
+
+    // ---- GOOGLE SHEETS DELETE ----
+    syncDeleteBillFromSheet(invoiceNo);
+    syncDeleteItemsFromSheet(billId);
+    syncDeletePaymentsFromSheet(billId);
+    syncDeleteRefundsFromSheet(billId);
+
+    return res.json({
+      success: true,
+      message: "Bill, Items, Payments, Refunds deleted successfully",
+      deleted: {
+        billId,
+        items: itemsSnap.size,
+        payments: paymentsSnap.size,
+        refunds: refundsSnap.size,
+      },
+    });
+  } catch (err) {
+    console.error("DELETE /api/bills/:id error:", err);
+    return res.status(500).json({ error: "Failed to delete bill" });
+  }
+});
+
+// ---------- GET /api/profile (fetch clinic profile) ----------
+app.get("/api/profile", async (_req, res) => {
+  try {
+    const key = makeCacheKey("profile", "clinic");
+    const data = await getOrSetCache(key, 120, async () => {
+      const profileRef = db.collection("settings").doc("clinicProfile");
+      const profileSnap = await profileRef.get();
+
+      if (!profileSnap.exists) {
+        // Return null if profile doesn't exist (first time setup)
+        return { exists: false };
+      }
+
+      return { exists: true, ...profileSnap.data() };
+    });
+
+    res.json(data);
+  } catch (err) {
+    console.error("GET /api/profile error:", err);
+    res.status(500).json({ error: "Failed to fetch profile" });
+  }
+});
+
+// ---------- PUT /api/profile (update clinic profile) ----------
+app.put("/api/profile", async (req, res) => {
+  try {
+    const {
+      session,
+      clinicName,
+      address,
+      pan,
+      regNo,
+      doctor1Name,
+      doctor1RegNo,
+      doctor2Name,
+      doctor2RegNo,
+      patientRepresentative,
+      clinicRepresentative,
+      phone,
+      email,
+      website,
+    } = req.body;
+
+    const profileData = {
+      session: session || "",
+      clinicName: clinicName || "",
+      address: address || "",
+      pan: pan || "",
+      regNo: regNo || "",
+      doctor1Name: doctor1Name || "",
+      doctor1RegNo: doctor1RegNo || "",
+      doctor2Name: doctor2Name || "",
+      doctor2RegNo: doctor2RegNo || "",
+      patientRepresentative: patientRepresentative || "",
+      clinicRepresentative: clinicRepresentative || "",
+      phone: phone || "",
+      email: email || "",
+      website: website || "",
+      updatedAt: new Date().toISOString(),
+    };
+
+    const profileRef = db.collection("settings").doc("clinicProfile");
+    await profileRef.set(profileData, { merge: true });
+
+    // Clear cache
+    cache.flushAll();
+
+    // Sync to Google Sheet (optional - add this function to sheetIntregation.js)
+    try {
+      syncProfileToSheet(profileData);
+    } catch (sheetErr) {
+      console.warn("Sheet sync failed for profile:", sheetErr);
+    }
+
+    res.json({
+      success: true,
+      message: "Profile updated successfully",
+      profile: profileData,
+    });
+  } catch (err) {
+    console.error("PUT /api/profile error:", err);
+    res.status(500).json({ error: "Failed to update profile" });
   }
 });
 
@@ -1429,7 +3855,7 @@ app.get("/api/bills/:id/invoice-html-pdf", async (req, res) => {
     }
 
     // ensure invoice no is fixed once generated: if missing, generate and save back
-    const generatedInvoiceNo = `INV-${id}`;
+    const generatedInvoiceNo = `S-${id}`;
     const invoiceNo = bill.invoiceNo || generatedInvoiceNo;
     if (!bill.invoiceNo) {
       // best-effort: persist invoice number so next time invoice remains same
@@ -2023,1020 +4449,6 @@ app.get("/api/bills/:id/invoice-html-pdf", async (req, res) => {
     }
   }
 });
-
-// ---------- PDF: Payment Receipt (A4 half page, professional layout) ----------
-app.get("/api/payments/:id/receipt-html-pdf", async (req, res) => {
-  const id = req.params.id;
-  if (!id) return res.status(400).json({ error: "Invalid payment id" });
-
-  try {
-    const paymentRef = db.collection("payments").doc(id);
-    const paymentSnap = await paymentRef.get();
-    if (!paymentSnap.exists) {
-      return res.status(404).json({ error: "Payment not found" });
-    }
-    const payment = paymentSnap.data();
-    const billId = payment.billId;
-
-    const billRef = db.collection("bills").doc(billId);
-    const billSnap = await billRef.get();
-    if (!billSnap.exists) {
-      return res.status(404).json({ error: "Bill not found" });
-    }
-    const bill = billSnap.data();
-    const billTotal = Number(bill.total || 0);
-
-    const paysSnap = await db
-      .collection("payments")
-      .where("billId", "==", billId)
-      .get();
-
-    const allPayments = paysSnap.docs
-      .map((doc) => {
-        const d = doc.data();
-        const paymentDateTime =
-          d.paymentDateTime ||
-          (d.paymentDate ? `${d.paymentDate}T00:00:00.000Z` : null);
-        return {
-          id: doc.id,
-          paymentDateTime,
-          amount: Number(d.amount || 0),
-        };
-      })
-      .sort((a, b) => {
-        const da = a.paymentDateTime
-          ? new Date(a.paymentDateTime)
-          : new Date(0);
-        const dbb = b.paymentDateTime
-          ? new Date(b.paymentDateTime)
-          : new Date(0);
-        return da - dbb;
-      });
-
-    let cumulativePaid = 0;
-    let paidTillThis = 0;
-    let balanceAfterThis = billTotal;
-
-    for (const p of allPayments) {
-      cumulativePaid += p.amount;
-      if (p.id === id) {
-        paidTillThis = cumulativePaid;
-        balanceAfterThis = billTotal - paidTillThis;
-        break;
-      }
-    }
-
-    function formatMoney(v) {
-      return Number(v || 0).toFixed(2);
-    }
-
-    const patientName = bill.patientName || "";
-    const address = bill.address || "";
-    const drawnOn = payment.drawnOn || null;
-    const drawnAs = payment.drawnAs || null;
-    const mode = payment.mode || "Cash";
-    const referenceNo = payment.referenceNo || null;
-    const receiptNo = payment.receiptNo || `R-${String(id).padStart(4, "0")}`;
-
-    const chequeDate = payment.chequeDate || null;
-    const chequeNumber = payment.chequeNumber || null;
-    const bankName = payment.bankName || null;
-    const transferType = payment.transferType || null;
-    const transferDate = payment.transferDate || null;
-    const upiName = payment.upiName || null;
-    const upiId = payment.upiId || null;
-    const upiDate = payment.upiDate || null;
-
-    // ---------- FETCH CLINIC PROFILE FRESH FOR PDF ----------
-    const profile = await getClinicProfile({ force: true });
-    const clinicName = profileValue(profile, "clinicName");
-    const clinicAddress = profileValue(profile, "address");
-    const clinicPAN = profileValue(profile, "pan");
-    const clinicRegNo = profileValue(profile, "regNo");
-    const doctor1Name = profileValue(profile, "doctor1Name");
-    const doctor1RegNo = profileValue(profile, "doctor1RegNo");
-    const doctor2Name = profileValue(profile, "doctor2Name");
-    const doctor2RegNo = profileValue(profile, "doctor2RegNo");
-    const patientRepresentative = profileValue(
-      profile,
-      "patientRepresentative"
-    );
-    const clinicRepresentative = profileValue(profile, "clinicRepresentative");
-
-    res.setHeader("Content-Type", "application/pdf");
-    res.setHeader(
-      "Content-Disposition",
-      `inline; filename="receipt-${id}.pdf"`
-    );
-
-    const doc = new PDFDocument({
-      size: "A4",
-      margin: 36,
-    });
-
-    doc.pipe(res);
-
-    const pageWidth = doc.page.width;
-    const usableWidth = pageWidth - 72;
-    let y = 40;
-
-    const logoLeftPath = path.join(__dirname, "resources", "logo-left.png");
-    const logoRightPath = path.join(__dirname, "resources", "logo-right.png");
-
-    const leftLogoX = 36;
-    const rightLogoX = pageWidth - 36;
-
-    // HEADER
-    try {
-      doc.image(logoLeftPath, leftLogoX, y, { width: 32, height: 32 });
-    } catch (e) {}
-    try {
-      doc.image(logoRightPath, rightLogoX - 32, y, { width: 32, height: 32 });
-    } catch (e) {}
-
-    doc
-      .font("Helvetica-Bold")
-      .fontSize(13)
-      .text(clinicName || "", 0, y + 2, {
-        align: "center",
-        width: pageWidth,
-      });
-
-    doc
-      .font("Helvetica")
-      .fontSize(9)
-      .text(clinicAddress || "", 0, y + 20, {
-        align: "center",
-        width: pageWidth,
-      })
-      .text(
-        (clinicPAN ? `PAN: ${clinicPAN}` : "") +
-          (clinicPAN && clinicRegNo ? "   |   " : "") +
-          (clinicRegNo ? `Reg. No.: ${clinicRegNo}` : ""),
-        {
-          align: "center",
-          width: pageWidth,
-        }
-      );
-
-    y += 48;
-
-    doc
-      .moveTo(36, y)
-      .lineTo(pageWidth - 36, y)
-      .stroke();
-    y += 6;
-
-    // DOCTOR LINE (from profile)
-    doc.font("Helvetica-Bold").fontSize(9);
-    doc.text(doctor1Name || "", 36, y);
-    doc.text(doctor2Name || "", pageWidth / 2, y, {
-      align: "right",
-      width: usableWidth / 2,
-    });
-
-    y += 12;
-    doc.font("Helvetica").fontSize(8);
-    doc.text(doctor1RegNo ? `Reg. No.: ${doctor1RegNo}` : "", 36, y);
-    doc.text(
-      doctor2RegNo ? `Reg. No.: ${doctor2RegNo}` : "",
-      pageWidth / 2,
-      y,
-      {
-        align: "right",
-        width: usableWidth / 2,
-      }
-    );
-
-    y += 16;
-
-    // TITLE BAR
-    doc
-      .save()
-      .rect(36, y, usableWidth, 18)
-      .fill("#F3F3F3")
-      .restore()
-      .rect(36, y, usableWidth, 18)
-      .stroke();
-
-    doc
-      .font("Helvetica-Bold")
-      .fontSize(10)
-      .text("PAYMENT RECEIPT", 36, y + 4, {
-        align: "center",
-        width: usableWidth,
-      });
-
-    y += 26;
-
-    // COMMON LAYOUT (left details + right summary)
-    const leftX = 36;
-    const rightBoxWidth = 180;
-    const rightX = pageWidth - 36 - rightBoxWidth;
-
-    doc.font("Helvetica").fontSize(9);
-    doc.text(`Receipt No.: ${receiptNo}`, leftX, y);
-    doc.text(`Date: ${formatDateDot(payment.paymentDate || "")}`, rightX, y, {
-      width: rightBoxWidth,
-      align: "right",
-    });
-
-    y += 16;
-
-    const detailsTopY = y;
-    const leftWidth = rightX - leftX - 10;
-
-    // doc
-    //   .font("Helvetica-Bold")
-    //   .text(`Patient Name: ${patientName}`, leftX, detailsTopY, {
-    //     width: leftWidth,
-    //   });
-
-    // let detailsY = doc.y + 4;
-    doc
-      .font("Helvetica-Bold")
-      .text(`Patient Name: ${patientName}`, leftX, detailsTopY, {
-        width: leftWidth,
-      });
-
-    doc.font("Helvetica").text(`Address: ${address}`, leftX, doc.y + 3, {
-      width: leftWidth,
-    });
-
-    let detailsY = doc.y + 4;
-
-    doc.font("Helvetica");
-
-    const addDetail = (label, value) => {
-      if (!value) return;
-      doc.text(`${label} ${value}`, leftX, detailsY, { width: leftWidth });
-      detailsY = doc.y + 3;
-    };
-
-    addDetail("Amount Received: Rs", formatMoney(payment.amount));
-    addDetail("Payment Mode:", mode);
-    addDetail("Cheque No.:", chequeNumber);
-    addDetail("Cheque Date:", formatDateDot(chequeDate));
-    addDetail("Bank:", bankName);
-    addDetail("Transfer Type:", transferType);
-    addDetail("Transfer Date:", formatDateDot(transferDate));
-    addDetail("UPI ID:", upiId);
-    addDetail("UPI Name:", upiName);
-    addDetail("UPI Date:", formatDateDot(upiDate));
-    addDetail("Reference No.:", referenceNo);
-    addDetail("Drawn On:", drawnOn);
-    addDetail("Drawn As:", drawnAs);
-
-    // RIGHT BILL SUMMARY BOX
-    const boxY = detailsTopY;
-    const lineH = 12;
-    const boxHeight = 100;
-
-    doc.rect(rightX, boxY, rightBoxWidth, boxHeight).stroke();
-
-    let by = boxY + 4;
-    doc
-      .font("Helvetica-Bold")
-      .fontSize(9)
-      .text("Bill Summary", rightX + 6, by);
-    by += lineH + 2;
-    doc.font("Helvetica").fontSize(9);
-
-    const billNoText = bill.invoiceNo || billId;
-
-    const addRow = (label, value) => {
-      doc.text(label, rightX + 6, by);
-      doc.text(value, rightX + 6, by, {
-        width: rightBoxWidth - 12,
-        align: "right",
-      });
-      by += lineH;
-    };
-
-    addRow("Bill No.:", billNoText);
-    addRow("Bill Date:", formatDateDot(bill.date || ""));
-    addRow("Bill Total:", `Rs ${formatMoney(billTotal)}`);
-    addRow("Paid (incl. this):", `Rs ${formatMoney(paidTillThis)}`);
-    addRow("Balance:", `Rs ${formatMoney(balanceAfterThis)}`);
-
-    // FOOTNOTE + SIGNATURES
-    y = Math.max(detailsY + 6, boxY + boxHeight + 6);
-
-    doc
-      .font("Helvetica")
-      .fontSize(8)
-      .text("* Dispute if any subject to Jamshedpur Jurisdiction", leftX, y, {
-        width: usableWidth,
-      });
-
-    const sigY = y + 40;
-    const sigWidth = 160;
-
-    // doc
-    //   .moveTo(leftX, sigY)
-    //   .lineTo(leftX + sigWidth, sigY)
-    //   .dash(1, { space: 2 })
-    //   .stroke()
-    //   .undash();
-    // doc.fontSize(8).text(patientRepresentative || "", leftX, sigY + 4, {
-    //   width: sigWidth,
-    //   align: "center",
-    // });
-
-    const rightSigX = pageWidth - 36 - sigWidth;
-    doc
-      .moveTo(rightSigX, sigY)
-      .lineTo(rightSigX + sigWidth, sigY)
-      .dash(1, { space: 2 })
-      .stroke()
-      .undash();
-    doc.fontSize(8).text(clinicRepresentative || "", rightSigX, sigY + 4, {
-      width: sigWidth,
-      align: "center",
-    });
-
-    doc.end();
-  } catch (err) {
-    console.error("receipt-html-pdf error:", err);
-    if (!res.headersSent) {
-      res.status(500).json({ error: "Failed to generate receipt PDF" });
-    }
-  }
-});
-
-app.put("/api/payments/:id", async (req, res) => {
-  const paymentId = req.params.id;
-  if (!paymentId) return res.status(400).json({ error: "Invalid payment id" });
-
-  const {
-    amount,
-    mode,
-    referenceNo,
-    drawnOn,
-    drawnAs,
-
-    // 🔵 ADDED - accept paymentDate for editing
-    paymentDate,
-
-    chequeDate,
-    chequeNumber,
-    bankName,
-    transferType,
-    transferDate,
-    upiName,
-    upiId,
-    upiDate,
-  } = req.body;
-
-  const newAmount = Number(amount);
-  if (Number.isNaN(newAmount) || newAmount <= 0) {
-    return res.status(400).json({ error: "Amount must be > 0" });
-  }
-
-  try {
-    const paymentRef = db.collection("payments").doc(paymentId);
-    const paymentSnap = await paymentRef.get();
-    if (!paymentSnap.exists) {
-      return res.status(404).json({ error: "Payment not found" });
-    }
-
-    const oldPayment = paymentSnap.data();
-    const billId = oldPayment.billId;
-
-    const billRef = db.collection("bills").doc(billId);
-    const billSnap = await billRef.get();
-    if (!billSnap.exists) {
-      return res.status(404).json({ error: "Bill not found" });
-    }
-
-    const bill = billSnap.data();
-
-    // ---- recompute totals ----
-    const delta = newAmount - Number(oldPayment.amount || 0);
-    const oldPaid = Number(bill.paid || 0);
-    const refunded = Number(bill.refunded || 0);
-
-    const newPaid = oldPaid + delta;
-    const effectivePaid = newPaid - refunded;
-    const total = Number(bill.total || 0);
-    const newBalance = total - effectivePaid;
-    const newStatus = computeStatus(total, effectivePaid);
-
-    const finalMode = mode || oldPayment.mode;
-
-    const updatedPayment = cleanFieldsByMode(finalMode, {
-      amount: newAmount,
-      mode: finalMode,
-      referenceNo: referenceNo ?? null,
-      drawnOn: drawnOn ?? null,
-      drawnAs: drawnAs ?? null,
-
-      // 🔵 ADDED - update paymentDate if provided
-      paymentDate: paymentDate || oldPayment.paymentDate,
-
-      chequeDate: chequeDate ?? null,
-      chequeNumber: chequeNumber ?? null,
-      bankName: bankName ?? null,
-
-      transferType: transferType ?? null,
-      transferDate: transferDate ?? null,
-
-      upiName: upiName ?? null,
-      upiId: upiId ?? null,
-      upiDate: upiDate ?? null,
-    });
-
-    const batch = db.batch();
-
-    batch.update(paymentRef, updatedPayment);
-
-    batch.update(billRef, {
-      paid: newPaid,
-      balance: newBalance,
-      status: newStatus,
-    });
-
-    await batch.commit();
-    cache.flushAll();
-
-    res.json({
-      success: true,
-      paymentId,
-      amount: newAmount,
-      billId,
-      paid: newPaid,
-      balance: newBalance,
-      status: newStatus,
-    });
-  } catch (err) {
-    console.error("EDIT payment error:", err);
-    res.status(500).json({ error: "Failed to edit payment" });
-  }
-});
-
-app.get("/api/refunds/:id/refund-html-pdf", async (req, res) => {
-  const id = req.params.id;
-  if (!id) return res.status(400).json({ error: "Invalid refund id" });
-
-  try {
-    // ---------- REFUND ----------
-    const refundRef = db.collection("refunds").doc(id);
-    const refundSnap = await refundRef.get();
-    if (!refundSnap.exists) {
-      return res.status(404).json({ error: "Refund not found" });
-    }
-    const refund = refundSnap.data();
-    const billId = refund.billId;
-
-    // ---------- BILL ----------
-    const billRef = db.collection("bills").doc(billId);
-    const billSnap = await billRef.get();
-    if (!billSnap.exists) {
-      return res.status(404).json({ error: "Bill not found" });
-    }
-    const bill = billSnap.data();
-    const billTotal = Number(bill.total || 0);
-
-    // ---------- PAYMENTS (GROSS) ----------
-    const paysSnap = await db
-      .collection("payments")
-      .where("billId", "==", billId)
-      .get();
-
-    const payments = paysSnap.docs.map((doc) => {
-      const d = doc.data();
-      return {
-        amount: Number(d.amount || 0),
-        date: new Date(
-          d.paymentDateTime ||
-            (d.paymentDate ? `${d.paymentDate}T00:00:00.000Z` : 0)
-        ),
-      };
-    });
-
-    const totalPaidGross = payments.reduce((s, p) => s + p.amount, 0);
-
-    // ---------- REFUNDS (ORDERED) ----------
-    const refundsSnap = await db
-      .collection("refunds")
-      .where("billId", "==", billId)
-      .get();
-
-    const refunds = refundsSnap.docs
-      .map((doc) => {
-        const d = doc.data();
-        return {
-          id: doc.id,
-          amount: Number(d.amount || 0),
-          date: new Date(
-            d.refundDateTime ||
-              (d.refundDate ? `${d.refundDate}T00:00:00.000Z` : 0)
-          ),
-        };
-      })
-      .sort((a, b) => a.date - b.date);
-
-    // ---------- REFUND TILL THIS RECEIPT ----------
-    let refundedTillThis = 0;
-    for (const r of refunds) {
-      refundedTillThis += r.amount;
-      if (r.id === id) break;
-    }
-
-    // ---------- FINAL NUMBERS (FIXED) ----------
-    // Net amount that customer has actually paid (after deducting refunds)
-    const netPaidTillThis = totalPaidGross - refundedTillThis;
-    
-    // Balance = Bill Total - Net Paid
-    // If Net Paid < Bill Total, customer owes money (positive balance)
-    // If Net Paid >= Bill Total, balance should be 0
-    const balanceAfterThis = Math.max(0, billTotal - netPaidTillThis);
-
-    // ---------- HELPERS ----------
-    function formatMoney(v) {
-      return Number(v || 0).toFixed(2);
-    }
-
-    // Assuming you already have these utility functions somewhere
-    // formatDateDot, getClinicProfile, profileValue, etc.
-
-    const patientName = bill.patientName || "";
-    const address = bill.address || "";
-    const drawnOn = refund.drawnOn || null;
-    const drawnAs = refund.drawnAs || null;
-    const mode = refund.mode || "Cash";
-    const referenceNo = refund.referenceNo || null;
-    const refundNo =
-      refund.refundReceiptNo || `F-${String(id).padStart(4, "0")}`;
-
-    const chequeDate = refund.chequeDate || null;
-    const chequeNumber = refund.chequeNumber || null;
-    const bankName = refund.bankName || null;
-    const transferType = refund.transferType || null;
-    const transferDate = refund.transferDate || null;
-    const upiName = refund.upiName || null;
-    const upiId = refund.upiId || null;
-    const upiDate = refund.upiDate || null;
-
-    // ---------- CLINIC PROFILE ----------
-    const profile = await getClinicProfile({ force: true });
-    const clinicName = profileValue(profile, "clinicName");
-    const clinicAddress = profileValue(profile, "address");
-    const clinicPAN = profileValue(profile, "pan");
-    const clinicRegNo = profileValue(profile, "regNo");
-    const doctor1Name = profileValue(profile, "doctor1Name");
-    const doctor1RegNo = profileValue(profile, "doctor1RegNo");
-    const doctor2Name = profileValue(profile, "doctor2Name");
-    const doctor2RegNo = profileValue(profile, "doctor2RegNo");
-    const clinicRepresentative = profileValue(profile, "clinicRepresentative");
-
-    // ---------- PDF HEADERS ----------
-    res.setHeader("Content-Type", "application/pdf");
-    res.setHeader(
-      "Content-Disposition",
-      `inline; filename="refund-${id}.pdf"`
-    );
-
-    const doc = new PDFDocument({
-      size: "A4",
-      margin: 36,
-    });
-
-    doc.pipe(res);
-
-    const pageWidth = doc.page.width;
-    const usableWidth = pageWidth - 72;
-    let y = 40;
-
-    const logoLeftPath = path.join(__dirname, "resources", "logo-left.png");
-    const logoRightPath = path.join(__dirname, "resources", "logo-right.png");
-
-    const leftLogoX = 36;
-    const rightLogoX = pageWidth - 36;
-
-    // HEADER
-    try {
-      doc.image(logoLeftPath, leftLogoX, y, { width: 32, height: 32 });
-    } catch (e) {}
-    try {
-      doc.image(logoRightPath, rightLogoX - 32, y, { width: 32, height: 32 });
-    } catch (e) {}
-
-    doc
-      .font("Helvetica-Bold")
-      .fontSize(13)
-      .text(clinicName || "", 0, y + 2, {
-        align: "center",
-        width: pageWidth,
-      });
-
-    doc
-      .font("Helvetica")
-      .fontSize(9)
-      .text(clinicAddress || "", 0, y + 20, {
-        align: "center",
-        width: pageWidth,
-      })
-      .text(
-        (clinicPAN ? `PAN: ${clinicPAN}` : "") +
-          (clinicPAN && clinicRegNo ? "   |   " : "") +
-          (clinicRegNo ? `Reg. No.: ${clinicRegNo}` : ""),
-        {
-          align: "center",
-          width: pageWidth,
-        }
-      );
-
-    y += 48;
-
-    doc.moveTo(36, y).lineTo(pageWidth - 36, y).stroke();
-    y += 6;
-
-    // DOCTOR LINE
-    doc.font("Helvetica-Bold").fontSize(9);
-    doc.text(doctor1Name || "", 36, y);
-    doc.text(doctor2Name || "", pageWidth / 2, y, {
-      align: "right",
-      width: usableWidth / 2,
-    });
-
-    y += 12;
-    doc.font("Helvetica").fontSize(8);
-    doc.text(doctor1RegNo ? `Reg. No.: ${doctor1RegNo}` : "", 36, y);
-    doc.text(
-      doctor2RegNo ? `Reg. No.: ${doctor2RegNo}` : "",
-      pageWidth / 2,
-      y,
-      {
-        align: "right",
-        width: usableWidth / 2,
-      }
-    );
-
-    y += 16;
-
-    // TITLE BAR
-    doc
-      .save()
-      .rect(36, y, usableWidth, 18)
-      .fill("#F3F3F3")
-      .restore()
-      .rect(36, y, usableWidth, 18)
-      .stroke();
-
-    doc.font("Helvetica-Bold").fontSize(10).text("REFUND RECEIPT", 36, y + 4, {
-      align: "center",
-      width: usableWidth,
-    });
-
-    y += 26;
-
-    // COMMON LAYOUT
-    const leftX = 36;
-    const rightBoxWidth = 180;
-    const rightX = pageWidth - 36 - rightBoxWidth;
-
-    doc.font("Helvetica").fontSize(9);
-    doc.text(`Refund No.: ${refundNo}`, leftX, y);
-    doc.text(`Date: ${formatDateDot(refund.refundDate || "")}`, rightX, y, {
-      width: rightBoxWidth,
-      align: "right",
-    });
-
-    y += 16;
-
-    const detailsTopY = y;
-    const leftWidth = rightX - leftX - 10;
-
-    doc
-      .font("Helvetica-Bold")
-      .text(`Patient Name: ${patientName}`, leftX, detailsTopY, {
-        width: leftWidth,
-      });
-    doc.font("Helvetica").text(`Address: ${address}`, leftX, doc.y + 3, {
-      width: leftWidth,
-    });
-
-    let detailsY = doc.y + 4;
-    doc.font("Helvetica");
-
-    const addDetailR = (label, value) => {
-      if (!value) return;
-      doc.text(`${label} ${value}`, leftX, detailsY, { width: leftWidth });
-      detailsY = doc.y + 3;
-    };
-
-    addDetailR("Amount Refunded: Rs", formatMoney(refund.amount));
-    addDetailR("Refund Mode:", mode);
-    addDetailR("Reference No.:", referenceNo);
-    addDetailR("Drawn On:", drawnOn);
-    addDetailR("Drawn As:", drawnAs);
-    addDetailR("Cheque No.:", chequeNumber);
-    addDetailR("Cheque Date:", formatDateDot(chequeDate));
-    addDetailR("Bank:", bankName);
-    addDetailR("Transfer Type:", transferType);
-    addDetailR("Transfer Date:", formatDateDot(transferDate));
-    addDetailR("UPI ID:", upiId);
-    addDetailR("UPI Name:", upiName);
-    addDetailR("UPI Date:", formatDateDot(upiDate));
-
-    // RIGHT BILL SUMMARY
-    const boxY = detailsTopY;
-    const lineH = 12;
-    const boxHeight = 100;
-
-    doc.rect(rightX, boxY, rightBoxWidth, boxHeight).stroke();
-
-    let by2 = boxY + 4;
-    doc.font("Helvetica-Bold").fontSize(9).text("Bill Summary", rightX + 6, by2);
-    by2 += lineH + 2;
-    doc.font("Helvetica").fontSize(9);
-
-    const billNoText2 = bill.invoiceNo || billId;
-
-    const addRow2 = (label, value) => {
-      doc.text(label, rightX + 6, by2);
-      doc.text(value, rightX + 6, by2, {
-        width: rightBoxWidth - 12,
-        align: "right",
-      });
-      by2 += lineH;
-    };
-
-    addRow2("Bill No.:", billNoText2);
-    addRow2("Bill Date:", formatDateDot(bill.date || ""));
-    addRow2("Bill Total:", `Rs ${formatMoney(billTotal)}`);
-    addRow2("Total Paid:", `Rs ${formatMoney(netPaidTillThis)}`);
-    //addRow2("Refunded (incl. this):", `Rs ${formatMoney(refundedTillThis)}`);
-    addRow2("Refunded (incl. this):", `Rs ${formatMoney(refund.amount)}`);
-    addRow2("Balance:", `Rs ${formatMoney(balanceAfterThis)}`);
-
-    // FOOTNOTE + SIGNATURES
-    y = Math.max(detailsY + 6, boxY + boxHeight + 6);
-
-    doc
-      .font("Helvetica")
-      .fontSize(8)
-      .text("* Dispute if any subject to Jamshedpur Jurisdiction", leftX, y, {
-        width: usableWidth,
-      });
-
-    const sigY = y + 24;
-    const sigWidth = 160;
-
-    const rightSigX = pageWidth - 36 - sigWidth;
-    doc
-      .moveTo(rightSigX, sigY)
-      .lineTo(rightSigX + sigWidth, sigY)
-      .dash(1, { space: 2 })
-      .stroke()
-      .undash();
-    doc.fontSize(8).text(clinicRepresentative || "", rightSigX, sigY + 4, {
-      width: sigWidth,
-      align: "center",
-    });
-
-    doc.end();
-  } catch (err) {
-    console.error("refund-html-pdf error:", err);
-    if (!res.headersSent) {
-      res.status(500).json({ error: "Failed to generate refund PDF" });
-    }
-  }
-});
-
-// ---------- PUT /api/refunds/:id (edit refund) ----------
-// app.put("/api/refunds/:id", async (req, res) => {
-//   const refundId = req.params.id;
-//   if (!refundId) return res.status(400).json({ error: "Invalid refund id" });
-
-//   const {
-//     amount,
-//     mode,
-//     referenceNo,
-//     drawnOn,
-//     drawnAs,
-
-//     // 🔵 ADDED - accept refundDate for editing
-//     refundDate,
-
-//     chequeDate,
-//     chequeNumber,
-//     bankName,
-//     transferType,
-//     transferDate,
-//     upiName,
-//     upiId,
-//     upiDate,
-//   } = req.body;
-
-//   const newAmount = Number(amount);
-//   if (Number.isNaN(newAmount) || newAmount <= 0) {
-//     return res.status(400).json({ error: "Amount must be > 0" });
-//   }
-
-//   try {
-//     const refundRef = db.collection("refunds").doc(refundId);
-//     const refundSnap = await refundRef.get();
-//     if (!refundSnap.exists) {
-//       return res.status(404).json({ error: "Refund not found" });
-//     }
-
-//     const oldRefund = refundSnap.data();
-//     const billId = oldRefund.billId;
-
-//     const billRef = db.collection("bills").doc(billId);
-//     const billSnap = await billRef.get();
-//     if (!billSnap.exists) {
-//       return res.status(404).json({ error: "Bill not found" });
-//     }
-
-//     const bill = billSnap.data();
-
-//     // ---- recompute totals ----
-//     const delta = newAmount - Number(oldRefund.amount || 0);
-//     const paidGross = Number(bill.paid || 0);
-//     const oldRefunded = Number(bill.refunded || 0);
-
-//     const newRefunded = oldRefunded + delta;
-//     if (newRefunded > paidGross) {
-//       return res.status(400).json({
-//         error: "Refund cannot exceed total paid amount",
-//       });
-//     }
-
-//     const effectivePaid = paidGross - newRefunded;
-//     const total = Number(bill.total || 0);
-//     const newBalance = total - effectivePaid;
-//     const newStatus = computeStatus(total, effectivePaid);
-
-//     const finalMode = mode || oldRefund.mode;
-
-//     const updatedRefund = cleanFieldsByMode(finalMode, {
-//       amount: newAmount,
-//       mode: finalMode,
-//       referenceNo: referenceNo ?? null,
-//       drawnOn: drawnOn ?? null,
-//       drawnAs: drawnAs ?? null,
-
-//       // 🔵 ADDED - update refundDate if provided
-//       refundDate: refundDate || oldRefund.refundDate,
-
-//       chequeDate: chequeDate ?? null,
-//       chequeNumber: chequeNumber ?? null,
-//       bankName: bankName ?? null,
-
-//       transferType: transferType ?? null,
-//       transferDate: transferDate ?? null,
-
-//       upiName: upiName ?? null,
-//       upiId: upiId ?? null,
-//       upiDate: upiDate ?? null,
-//     });
-
-//     const batch = db.batch();
-
-//     batch.update(refundRef, updatedRefund);
-
-//     batch.update(billRef, {
-//       refunded: newRefunded,
-//       balance: newBalance,
-//       status: newStatus,
-//     });
-
-//     await batch.commit();
-//     cache.flushAll();
-
-//     res.json({
-//       success: true,
-//       refundId,
-//       amount: newAmount,
-//       billId,
-//       refunded: newRefunded,
-//       balance: newBalance,
-//       status: newStatus,
-//     });
-//   } catch (err) {
-//     console.error("EDIT refund error:", err);
-//     res.status(500).json({ error: "Failed to edit refund" });
-//   }
-// });
-
-// ---------- PUT /api/refunds/:id (EDIT REFUND) ----------
-app.put("/api/refunds/:id", async (req, res) => {
-  const refundId = req.params.id;
-  if (!refundId) return res.status(400).json({ error: "Invalid refund id" });
-
-  const {
-    amount,
-    mode,
-    refundDate,
-    referenceNo,
-    drawnOn,
-    drawnAs,
-
-    chequeDate,
-    chequeNumber,
-    bankName,
-
-    transferType,
-    transferDate,
-
-    upiName,
-    upiId,
-    upiDate,
-  } = req.body;
-
-  const newAmount = Number(amount);
-  if (!newAmount || newAmount <= 0) {
-    return res.status(400).json({ error: "Refund amount must be > 0" });
-  }
-
-  try {
-    const refundRef = db.collection("refunds").doc(refundId);
-    const refundSnap = await refundRef.get();
-
-    if (!refundSnap.exists) {
-      return res.status(404).json({ error: "Refund not found" });
-    }
-
-    const oldRefund = refundSnap.data();
-    const billId = oldRefund.billId;
-
-    const billRef = db.collection("bills").doc(billId);
-    const billSnap = await billRef.get();
-
-    if (!billSnap.exists) {
-      return res.status(404).json({ error: "Bill not found" });
-    }
-
-    const bill = billSnap.data();
-
-    // 🔴 CORE LOGIC — adjust bill totals safely
-    const oldRefundAmount = Number(oldRefund.amount || 0);
-    const delta = newAmount - oldRefundAmount;
-
-    const oldRefunded = Number(bill.refunded || 0);
-    const oldNetPaid = Number(bill.paid || 0);
-    const total = Number(bill.total || 0);
-
-    const newRefunded = oldRefunded + delta;
-    const newNetPaid = oldNetPaid - delta;
-    const newBalance = total - newNetPaid;
-    const newStatus = computeStatus(total, newNetPaid);
-
-    if (newNetPaid < 0) {
-      return res.status(400).json({
-        error: "Refund exceeds paid amount",
-      });
-    }
-
-    const batch = db.batch();
-
-    batch.update(refundRef, {
-      amount: newAmount,
-      mode: mode || "Cash",
-      refundDate,
-      referenceNo: referenceNo || null,
-      drawnOn: drawnOn || null,
-      drawnAs: drawnAs || null,
-
-      chequeDate: chequeDate || null,
-      chequeNumber: chequeNumber || null,
-      bankName: bankName || null,
-
-      transferType: transferType || null,
-      transferDate: transferDate || null,
-
-      upiName: upiName || null,
-      upiId: upiId || null,
-      upiDate: upiDate || null,
-    });
-
-    batch.update(billRef, {
-      refunded: newRefunded,
-      paid: newNetPaid,
-      balance: newBalance,
-      status: newStatus,
-    });
-
-    await batch.commit();
-
-    cache.flushAll();
-
-    res.json({
-      success: true,
-      refundId,
-      newNetPaid,
-      newBalance,
-      newRefunded,
-    });
-  } catch (err) {
-    console.error("PUT /api/refunds/:id error:", err);
-    res.status(500).json({ error: "Failed to update refund" });
-  }
-});
-
 
 // ---------- PDF: Bill Summary (A4 full page, chronological timeline) ----------
 app.get("/api/bills/:id/summary-pdf", async (req, res) => {
@@ -3692,1441 +5104,7 @@ app.get("/api/bills/:id/summary-pdf", async (req, res) => {
   }
 });
 
-app.put("/api/bills/:id", async (req, res) => {
-  const billId = req.params.id;
-  if (!billId) return res.status(400).json({ error: "Invalid bill id" });
 
-  try {
-    const billRef = db.collection("bills").doc(billId);
-    const billSnap = await billRef.get();
-
-    if (!billSnap.exists) {
-      return res.status(404).json({ error: "Bill not found" });
-    }
-
-    const oldBill = billSnap.data();
-
-    // Editable fields from frontend (everything except payment info)
-    const {
-      patientName,
-      sex,
-      address,
-      age,
-      date,
-      remarks,
-      services,
-      procedureDone, // ✅ ADD
-    } = req.body;
-
-    if (!date && !oldBill.date) {
-      return res.status(400).json({ error: "Bill date is required" });
-    }
-    const jsDate = date || oldBill.date;
-
-    // --- NORMALIZE SERVICES (same style as POST /api/bills) ---
-    const normalizedServices = Array.isArray(services)
-      ? services.map((s) => {
-          const qty = Number(s.qty) || 0;
-          const rate = Number(s.rate) || 0;
-          const amount = qty * rate;
-          return {
-            item: s.item || s.description || "",
-            details: s.details || "",
-            qty,
-            rate,
-            amount,
-          };
-        })
-      : [];
-
-    // YE data hum ITEMS collection me likhenge
-    const itemsData = normalizedServices.map((s) => {
-      const description = s.item || s.details || "";
-      return {
-        description,
-        qty: s.qty,
-        rate: s.rate,
-        amount: s.amount,
-      };
-    });
-
-    const total = itemsData.reduce(
-      (sum, it) => sum + Number(it.amount || 0),
-      0
-    );
-
-    // keep payments/refunds as is
-    const paidGross = Number(oldBill.paid || 0);
-    const refunded = Number(oldBill.refunded || 0);
-    const effectivePaid = paidGross - refunded;
-    const balance = total - effectivePaid;
-    const status = computeStatus(total, effectivePaid);
-
-    const batch = db.batch();
-
-    // 1) Update bill doc
-    const finalPatientName = patientName ?? oldBill.patientName ?? "";
-
-    batch.update(billRef, {
-      patientName: finalPatientName,
-      sex: sex ?? oldBill.sex ?? null,
-      address: address ?? oldBill.address ?? "",
-      age: typeof age !== "undefined" ? Number(age) : oldBill.age ?? null,
-      date: jsDate,
-      procedureDone:
-        typeof procedureDone !== "undefined"
-          ? procedureDone
-          : oldBill.procedureDone ?? null,
-
-      total,
-      paid: paidGross,
-      refunded,
-      balance,
-      status,
-      remarks:
-        typeof remarks !== "undefined" ? remarks : oldBill.remarks ?? null,
-      services: normalizedServices,
-    });
-
-    // 2) Replace items collection for this bill
-    //    (pehle saare old items delete, fir naya set create)
-    const existingItemsSnap = await db
-      .collection("items")
-      .where("billId", "==", billId)
-      .get();
-
-    existingItemsSnap.forEach((doc) => {
-      batch.delete(doc.ref);
-    });
-
-    // 3) NEW ITEMS INSERT with deterministic ID:
-    itemsData.forEach((item, index) => {
-      const lineNo = index + 1;
-      const itemId = `${billId}-${String(lineNo).padStart(2, "0")}`; // e.g. 25-26_INV-0001-01
-
-      const qty = Number(item.qty || 0);
-      const rate = Number(item.rate || 0);
-      const amount = Number(item.amount || qty * rate || 0);
-
-      batch.set(db.collection("items").doc(itemId), {
-        billId,
-        patientName: finalPatientName,
-        description: item.description,
-        qty,
-        rate,
-        amount,
-      });
-    });
-
-    await batch.commit();
-
-    // clear caches so GET /api/bills and /api/bills/:id show updated data
-    cache.flushAll();
-
-    // update Google Sheet (optional but consistent with create)
-    syncBillToSheet({
-      id: billId,
-      invoiceNo: oldBill.invoiceNo || billId,
-      patientName: finalPatientName,
-      address: address ?? oldBill.address ?? "",
-      age: typeof age !== "undefined" ? Number(age) : oldBill.age ?? null,
-      date: jsDate,
-      total,
-      paid: paidGross,
-      refunded,
-      balance,
-      status,
-      sex: sex ?? oldBill.sex ?? null,
-    });
-
-    syncItemsToSheet(
-      billId,
-      billId,
-      finalPatientName,
-      itemsData.map((it) => ({
-        description: it.description,
-        qty: it.qty,
-        rate: it.rate,
-        amount: it.amount,
-      }))
-    );
-
-    res.json({
-      id: billId,
-      invoiceNo: oldBill.invoiceNo || billId,
-      patientName: finalPatientName,
-      sex: sex ?? oldBill.sex ?? null,
-      address: address ?? oldBill.address ?? "",
-      age: typeof age !== "undefined" ? Number(age) : oldBill.age ?? null,
-      date: jsDate,
-      total,
-      paid: paidGross,
-      refunded,
-      balance,
-      status,
-      remarks:
-        typeof remarks !== "undefined" ? remarks : oldBill.remarks ?? null,
-      services: normalizedServices,
-    });
-  } catch (err) {
-    console.error("PUT /api/bills/:id error:", err);
-    res.status(500).json({ error: "Failed to update bill" });
-  }
-});
-
-// DELETE bill + items + payments + refunds + sheet rows
-app.delete("/api/bills/:id", async (req, res) => {
-  const billId = req.params.id;
-  if (!billId) return res.status(400).json({ error: "Invalid bill id" });
-
-  try {
-    const billRef = db.collection("bills").doc(billId);
-    const billSnap = await billRef.get();
-
-    if (!billSnap.exists) {
-      return res.status(404).json({ error: "Bill not found" });
-    }
-
-    const bill = billSnap.data();
-    const invoiceNo = bill.invoiceNo || billId;
-
-    // ---- FETCH CHILD DOCUMENTS ----
-    const itemsSnap = await db
-      .collection("items")
-      .where("billId", "==", billId)
-      .get();
-    const paymentsSnap = await db
-      .collection("payments")
-      .where("billId", "==", billId)
-      .get();
-    const refundsSnap = await db
-      .collection("refunds")
-      .where("billId", "==", billId)
-      .get();
-
-    // ---- BATCH DELETE ----
-    const batch = db.batch();
-
-    batch.delete(billRef);
-
-    itemsSnap.forEach((doc) => batch.delete(doc.ref));
-    paymentsSnap.forEach((doc) => batch.delete(doc.ref));
-    refundsSnap.forEach((doc) => batch.delete(doc.ref));
-
-    await batch.commit();
-
-    // ---- CLEAR CACHE ----
-    cache.flushAll();
-
-    // ---- GOOGLE SHEETS DELETE ----
-    syncDeleteBillFromSheet(invoiceNo);
-    syncDeleteItemsFromSheet(billId);
-    syncDeletePaymentsFromSheet(billId);
-    syncDeleteRefundsFromSheet(billId);
-
-    return res.json({
-      success: true,
-      message: "Bill, Items, Payments, Refunds deleted successfully",
-      deleted: {
-        billId,
-        items: itemsSnap.size,
-        payments: paymentsSnap.size,
-        refunds: refundsSnap.size,
-      },
-    });
-  } catch (err) {
-    console.error("DELETE /api/bills/:id error:", err);
-    return res.status(500).json({ error: "Failed to delete bill" });
-  }
-});
-
-
-app.get("/api/bills/:id/full-payment-pdf", async (req, res) => {
-  const id = req.params.id;
-  if (!id) return res.status(400).json({ error: "Invalid bill id" });
-
-  function formatMoney(v) {
-    return Number(v || 0).toFixed(2);
-  }
-
-  function formatDateOnly(dtString) {
-    return typeof formatDateDot === "function"
-      ? formatDateDot(dtString)
-      : dtString || "";
-  }
-
-  try {
-    // ---------- LOAD BILL ----------
-    const billRef = db.collection("bills").doc(id);
-    const billSnap = await billRef.get();
-    if (!billSnap.exists)
-      return res.status(404).json({ error: "Bill not found" });
-    const bill = billSnap.data();
-
-    // fetch items (legacy/new combined)
-    const itemsSnap = await db
-      .collection("items")
-      .where("billId", "==", id)
-      .get();
-    const legacyItems = itemsSnap.docs.map((d) => {
-      const dd = d.data();
-      return {
-        id: d.id,
-        description: dd.description || dd.item || dd.details || "",
-        qty: Number(dd.qty || 0),
-        rate: Number(dd.rate || 0),
-        amount:
-          dd.amount != null
-            ? Number(dd.amount)
-            : Number(dd.qty || 0) * Number(dd.rate || 0),
-      };
-    });
-
-    const serviceItems = Array.isArray(bill.services)
-      ? bill.services.map((s, idx) => {
-          const qty = Number(s.qty || 0);
-          const rate = Number(s.rate || 0);
-          const amount = s.amount != null ? Number(s.amount) : qty * rate;
-          const parts = [];
-          if (s.item) parts.push(s.item);
-          if (s.details) parts.push(s.details);
-          return {
-            id: `svc-${idx + 1}`,
-            description: parts.join(" - "),
-            qty,
-            rate,
-            amount,
-          };
-        })
-      : [];
-    const items = serviceItems.length > 0 ? serviceItems : legacyItems;
-
-    // payments & refunds
-    const paysSnap = await db
-      .collection("payments")
-      .where("billId", "==", id)
-      .get();
-    const payments = paysSnap.docs.map((d) => {
-      const pd = d.data();
-      return {
-        id: d.id,
-        paymentDateTime:
-          pd.paymentDateTime ||
-          (pd.paymentDate
-            ? `${pd.paymentDate}T${pd.paymentTime || "00:00"}:00.000Z`
-            : null),
-        paymentDate: pd.paymentDate || null,
-        paymentTime: pd.paymentTime || null,
-        amount: Number(pd.amount || 0),
-        mode: pd.mode || "",
-        referenceNo: pd.referenceNo || "",
-        chequeDate: pd.chequeDate || null,
-        chequeNumber: pd.chequeNumber || null,
-        bankName: pd.bankName || null,
-        transferType: pd.transferType || null,
-        transferDate: pd.transferDate || null,
-        upiName: pd.upiName || null,
-        upiId: pd.upiId || null,
-        upiDate: pd.upiDate || null,
-        drawnOn: pd.drawnOn || null,
-        drawnAs: pd.drawnAs || null,
-        receiptNo: pd.receiptNo || d.id,
-      };
-    });
-
-    const refundsSnap = await db
-      .collection("refunds")
-      .where("billId", "==", id)
-      .get();
-    const refunds = refundsSnap.docs.map((d) => ({ id: d.id, ...d.data() }));
-
-    // sort payments chronologically
-    payments.sort((a, b) => {
-      const da = a.paymentDateTime ? new Date(a.paymentDateTime) : new Date(0);
-      const dbb = b.paymentDateTime ? new Date(b.paymentDateTime) : new Date(0);
-      return da - dbb;
-    });
-
-    // totals
-    const total = Number(
-      bill.total || items.reduce((s, it) => s + Number(it.amount || 0), 0)
-    );
-    const totalPaidGross = payments.reduce(
-      (s, p) => s + Number(p.amount || 0),
-      0
-    );
-    const totalRefunded = refunds.reduce(
-      (s, r) => s + Number(r.amount || 0),
-      0
-    );
-    const netPaid = totalPaidGross - totalRefunded;
-    const balance = total - netPaid;
-
-    // Only allow full-payment PDF if balance is zero (or less)
-    if (balance > 0) {
-      return res.status(400).json({
-        error:
-          "Bill not fully paid - full payment PDF is available only after full payment",
-      });
-    }
-
-    // ---------- FETCH CLINIC PROFILE ----------
-    const profile = await getClinicProfile({ force: true });
-    const clinicName = profileValue(profile, "clinicName");
-    const clinicAddress = profileValue(profile, "address");
-    const clinicPAN = profileValue(profile, "pan");
-    const clinicRegNo = profileValue(profile, "regNo");
-    const doctor1Name = profileValue(profile, "doctor1Name");
-    const doctor1RegNo = profileValue(profile, "doctor1RegNo");
-    const doctor2Name = profileValue(profile, "doctor2Name");
-    const doctor2RegNo = profileValue(profile, "doctor2RegNo");
-    const patientRepresentative = profileValue(
-      profile,
-      "patientRepresentative"
-    );
-    const clinicRepresentative = profileValue(profile, "clinicRepresentative");
-
-    // --- PDF Setup ---
-    res.setHeader("Content-Type", "application/pdf");
-    res.setHeader(
-      "Content-Disposition",
-      `inline; filename="full-payment-${id}.pdf"`
-    );
-
-    const doc = new PDFDocument({ size: "A4", margin: 0 });
-    doc.pipe(res);
-
-    const pageMargin = 15;
-    const borderPadding = 20;
-
-    function computeContentArea() {
-      const pw = doc.page.width;
-      const ph = doc.page.height;
-      const contentLeft = pageMargin + borderPadding;
-      const contentTop = pageMargin + borderPadding;
-      const contentRight = pw - (pageMargin + borderPadding);
-      const contentBottom = ph - (pageMargin + borderPadding);
-      const usableWidth = contentRight - contentLeft;
-      const usableHeight = contentBottom - contentTop;
-      return {
-        contentLeft,
-        contentTop,
-        contentRight,
-        contentBottom,
-        usableWidth,
-        usableHeight,
-      };
-    }
-
-    function drawPageBorder() {
-      try {
-        const pw = doc.page.width;
-        const ph = doc.page.height;
-        doc.save();
-        doc.lineWidth(0.8);
-        doc
-          .rect(
-            pageMargin,
-            pageMargin,
-            pw - pageMargin * 2,
-            ph - pageMargin * 2
-          )
-          .stroke();
-        doc.restore();
-      } catch (e) {
-        /* ignore */
-      }
-    }
-
-    // fonts
-    try {
-      const workSansPath = path.join(
-        __dirname,
-        "resources",
-        "WorkSans-Regular.ttf"
-      );
-      if (fs && fs.existsSync(workSansPath)) {
-        doc.registerFont("WorkSans", workSansPath);
-        doc.font("WorkSans");
-      } else {
-        doc.font("Helvetica");
-      }
-    } catch (e) {
-      doc.font("Helvetica");
-    }
-
-    // initial
-    drawPageBorder();
-    let { contentLeft, contentTop, contentRight, usableWidth } =
-      computeContentArea();
-    let y = contentTop;
-
-    const logoLeftPath = path.join(__dirname, "resources", "logo-left.png");
-    const logoRightPath = path.join(__dirname, "resources", "logo-right.png");
-
-    function drawPageHeader() {
-      const ca = computeContentArea();
-      contentLeft = ca.contentLeft;
-      contentTop = ca.contentTop;
-      contentRight = ca.contentRight;
-      usableWidth = ca.usableWidth;
-
-      const logoW = 40;
-      const logoH = 40;
-      try {
-        if (fs && fs.existsSync(logoLeftPath))
-          doc.image(logoLeftPath, contentLeft, y, {
-            width: logoW,
-            height: logoH,
-          });
-      } catch (e) {}
-      try {
-        if (fs && fs.existsSync(logoRightPath))
-          doc.image(logoRightPath, contentRight - logoW, y, {
-            width: logoW,
-            height: logoH,
-          });
-      } catch (e) {}
-
-      doc
-        .fontSize(14)
-        .font("Helvetica-Bold")
-        .text(clinicName || "", contentLeft, y + 6, {
-          width: usableWidth,
-          align: "center",
-        });
-      doc
-        .fontSize(9)
-        .font("Helvetica")
-        .text(clinicAddress || "", contentLeft, y + 26, {
-          width: usableWidth,
-          align: "center",
-        });
-      doc.text(
-        `PAN : ${clinicPAN || ""}   |   Reg. No: ${clinicRegNo || ""}`,
-        contentLeft,
-        y + 40,
-        { width: usableWidth, align: "center" }
-      );
-
-      y += 56;
-      doc.moveTo(contentLeft, y).lineTo(contentRight, y).stroke();
-      y += 8;
-    }
-
-    drawPageHeader();
-
-    // --- doctors, invoice title, patient info ---
-    doc.fontSize(9).font("Helvetica-Bold");
-    doc.text(doctor1Name || "", contentLeft, y);
-    doc.text(doctor2Name || "", contentLeft, y, {
-      width: usableWidth,
-      align: "right",
-    });
-    y += 12;
-    doc.font("Helvetica").fontSize(8);
-    doc.text(doctor1RegNo ? `Reg. No.: ${doctor1RegNo}` : "", contentLeft, y);
-    doc.text(doctor2RegNo ? `Reg. No.: ${doctor2RegNo}` : "", contentLeft, y, {
-      width: usableWidth,
-      align: "right",
-    });
-    y += 18;
-
-    doc
-      .fontSize(10)
-      .font("Helvetica-Bold")
-      .rect(contentLeft, y, usableWidth, 18)
-      .stroke();
-    doc.text("INVOICE CUM PAYMENT RECEIPT", contentLeft, y + 4, {
-      width: usableWidth,
-      align: "center",
-    });
-    y += 28;
-
-    const invoiceNo = bill.invoiceNo || id;
-    const dateText = formatDateOnly(bill.date || "");
-    doc.fontSize(9).font("Helvetica-Bold");
-    doc.text(`Invoice No.: ${invoiceNo}`, contentLeft, y);
-    doc.text(`Date: ${dateText}`, contentLeft, y, {
-      width: usableWidth,
-      align: "right",
-    });
-    y += 14;
-
-    // Patient info
-    const patientName = bill.patientName || "";
-    const sexText = bill.sex ? String(bill.sex) : "";
-    const ageText =
-      bill.age != null && bill.age !== "" ? `${bill.age} Years` : "";
-    const addressText = bill.address || "";
-    const procedureText = bill.procedureDone || "";
-
-    doc
-      .font("Helvetica-Bold")
-      .text(`Patient Name: ${patientName}`, contentLeft, y);
-    // Age/Sex commented in original
-    y += 14;
-
-    doc.font("Helvetica");
-    if (sexText) {
-      doc.text(
-        `Address: ${addressText || "____________________"}`,
-        contentLeft,
-        y,
-        {
-          width: usableWidth * 0.6,
-        }
-      );
-      y += 20;
-    } else {
-      doc.text(
-        `Address: ${addressText || "____________________"}`,
-        contentLeft,
-        y,
-        {
-          width: usableWidth,
-        }
-      );
-      y += 20;
-    }
-
-    // Procedure Done
-    doc
-      .fontSize(9)
-      .font("Helvetica")
-      .text(
-        `Procedure Done :- ${procedureText || "____________________"}`,
-        contentLeft,
-        y
-      );
-
-    y += 14;
-
-    // ---------- SERVICES / ITEMS TABLE ----------
-    const tableLeft = contentLeft;
-    const colSrW = 24;
-    const colQtyW = 48;
-    const colRateW = 70;
-    const colSubW = 80;
-    const colServiceW = usableWidth - (colSrW + colQtyW + colRateW + colSubW);
-    const colSrX = tableLeft;
-    const colServiceX = colSrX + colSrW;
-    const colQtyX = colServiceX + colServiceW;
-    const colRateX = colQtyX + colQtyW;
-    const colSubX = colRateX + colRateW;
-    const tableRightX = tableLeft + usableWidth;
-
-    const headerHeight = 14;
-    const headerPadding = 2;
-    const headerDrawH = headerHeight + headerPadding * 2;
-    const minRowH = 12;
-    const minTableHeight = 180;
-    const bottomSafety = 100;
-
-    function drawVerticalsForItemsBlock(yTop, height) {
-      const xs = [colSrX, colServiceX, colQtyX, colRateX, colSubX, tableRightX];
-      xs.forEach((x) => {
-        doc
-          .moveTo(x, yTop)
-          .lineTo(x, yTop + height)
-          .stroke();
-      });
-    }
-
-    let tableStartY = y;
-
-    // header background + text
-    doc
-      .save()
-      .rect(tableLeft, y, usableWidth, headerDrawH)
-      .fill("#F3F3F3")
-      .restore();
-    doc.font("Helvetica-Bold").fontSize(9);
-    const headerTextYOffset = headerPadding + 3;
-    doc.text("Sr.", colSrX + 4, y + headerTextYOffset);
-    doc.text(
-      "Description of Items / Services",
-      colServiceX + 4,
-      y + headerTextYOffset,
-      { width: colServiceW - 8 }
-    );
-    doc.text("Qty", colQtyX + 4, y + headerTextYOffset);
-    doc.text("Rate", colRateX + 4, y + headerTextYOffset, {
-      width: colRateW - 8,
-      align: "right",
-    });
-    doc.text("Amount", colSubX + 4, y + headerTextYOffset, {
-      width: colSubW - 8,
-      align: "right",
-    });
-
-    y += headerDrawH;
-    doc.moveTo(tableLeft, y).lineTo(tableRightX, y).stroke();
-
-    // render items
-    doc.font("Helvetica").fontSize(9);
-    let filledHeight = 0;
-    for (let i = 0; i < items.length; i++) {
-      const it = items[i];
-
-      const descH = doc.heightOfString(it.description || "", {
-        width: colServiceW - 8,
-      });
-      const qtyH = doc.heightOfString(String(it.qty || ""), {
-        width: colQtyW - 8,
-      });
-      const rateH = doc.heightOfString(formatMoney(it.rate || 0), {
-        width: colRateW - 8,
-      });
-      const amtH = doc.heightOfString(formatMoney(it.amount || 0), {
-        width: colSubW - 8,
-      });
-
-      const contentMaxH = Math.max(descH, qtyH, rateH, amtH);
-      const thisRowH = Math.max(minRowH, contentMaxH + 6);
-
-      // page-break check
-      if (y + thisRowH > doc.page.height - bottomSafety) {
-        const visualHeightSoFar = headerDrawH + filledHeight;
-        if (visualHeightSoFar > 0) {
-          drawVerticalsForItemsBlock(tableStartY, visualHeightSoFar);
-          doc
-            .rect(tableLeft, tableStartY, usableWidth, visualHeightSoFar)
-            .stroke();
-        }
-
-        doc.addPage();
-        // after addPage, draw border and header for the new page and reset content area
-        drawPageBorder();
-        ({ contentLeft, contentTop, contentRight, usableWidth } =
-          computeContentArea());
-        y = contentTop;
-
-        // redraw page header
-        drawPageHeader();
-
-        // re-render invoice title on new page
-        doc
-          .fontSize(10)
-          .font("Helvetica-Bold")
-          .rect(contentLeft, y, usableWidth, 18)
-          .stroke();
-        doc.text("INVOICE CUM PAYMENT RECEIPT", contentLeft, y + 4, {
-          width: usableWidth,
-          align: "center",
-        });
-        y += 28;
-
-        // redraw table header for this new page
-        tableStartY = y;
-        doc
-          .save()
-          .rect(tableLeft, y, usableWidth, headerDrawH)
-          .fill("#F3F3F3")
-          .restore();
-        doc.font("Helvetica-Bold").fontSize(9);
-        doc.text("Sr.", colSrX + 4, y + headerTextYOffset);
-        doc.text(
-          "Description of Items / Services",
-          colServiceX + 4,
-          y + headerTextYOffset,
-          { width: colServiceW - 8 }
-        );
-        doc.text("Qty", colQtyX + 4, y + headerTextYOffset);
-        doc.text("Rate", colRateX + 4, y + headerTextYOffset, {
-          width: colRateW - 8,
-          align: "right",
-        });
-        doc.text("Amount", colSubX + 4, y + headerTextYOffset, {
-          width: colSubW - 8,
-          align: "right",
-        });
-        y += headerDrawH;
-        doc.moveTo(tableLeft, y).lineTo(tableRightX, y).stroke();
-
-        filledHeight = 0;
-      }
-
-      // draw row text
-      const descH2 = doc.heightOfString(it.description || "", {
-        width: colServiceW - 8,
-      });
-      const qtyH2 = doc.heightOfString(String(it.qty || ""), {
-        width: colQtyW - 8,
-      });
-      const rateH2 = doc.heightOfString(formatMoney(it.rate || 0), {
-        width: colRateW - 8,
-      });
-      const amtH2 = doc.heightOfString(formatMoney(it.amount || 0), {
-        width: colSubW - 8,
-      });
-      const actualRowH = Math.max(
-        minRowH,
-        Math.max(descH2, qtyH2, rateH2, amtH2) + 6
-      );
-
-      const rowTop = y;
-      const descY = rowTop + (actualRowH - descH2) / 2;
-      const qtyY = rowTop + (actualRowH - qtyH2) / 2;
-      const rateY = rowTop + (actualRowH - rateH2) / 2;
-      const amtY = rowTop + (actualRowH - amtH2) / 2;
-
-      doc.text(String(i + 1), colSrX + 4, rowTop + 3);
-      doc.text(it.description || "", colServiceX + 4, descY, {
-        width: colServiceW - 8,
-      });
-      doc.text(
-        String(it.qty != null && it.qty !== "" ? it.qty : ""),
-        colQtyX + 4,
-        qtyY,
-        { width: colQtyW - 8, align: "left" }
-      );
-      doc.text(formatMoney(it.rate || 0), colRateX + 4, rateY, {
-        width: colRateW - 8,
-        align: "right",
-      });
-      doc.text(formatMoney(it.amount || 0), colSubX + 4, amtY, {
-        width: colSubW - 8,
-        align: "right",
-      });
-
-      y += actualRowH;
-      filledHeight += actualRowH;
-    }
-
-    // ensure minimum visual height of the items block (filler rows)
-    let totalTableHeight = filledHeight;
-    if (totalTableHeight < minTableHeight) {
-      let needed = minTableHeight - totalTableHeight;
-      const fillerRows = Math.ceil(needed / minRowH);
-      for (let fr = 0; fr < fillerRows; fr++) {
-        if (y + minRowH > doc.page.height - bottomSafety) {
-          drawVerticalsForItemsBlock(
-            tableStartY,
-            headerDrawH + totalTableHeight
-          );
-          doc
-            .rect(
-              tableLeft,
-              tableStartY,
-              usableWidth,
-              headerDrawH + totalTableHeight
-            )
-            .stroke();
-
-          doc.addPage();
-          drawPageBorder();
-          ({ contentLeft, contentTop, contentRight, usableWidth } =
-            computeContentArea());
-          y = contentTop;
-
-          // redraw page header + invoice title
-          drawPageHeader();
-          doc
-            .fontSize(10)
-            .font("Helvetica-Bold")
-            .rect(contentLeft, y, usableWidth, 18)
-            .stroke();
-          doc.text("INVOICE CUM PAYMENT RECEIPT", contentLeft, y + 4, {
-            width: usableWidth,
-            align: "center",
-          });
-          y += 28;
-
-          // render header again, reset trackers
-          tableStartY = y;
-          doc
-            .save()
-            .rect(tableLeft, y, usableWidth, headerDrawH)
-            .fill("#F3F3F3")
-            .restore();
-          doc.font("Helvetica-Bold").fontSize(9);
-          doc.text("Sr.", colSrX + 4, y + headerTextYOffset);
-          doc.text(
-            "Description of Items / Services",
-            colServiceX + 4,
-            y + headerTextYOffset,
-            { width: colServiceW - 8 }
-          );
-          doc.text("Qty", colQtyX + 4, y + headerTextYOffset);
-          doc.text("Rate", colRateX + 4, y + headerTextYOffset, {
-            width: colRateW - 8,
-            align: "right",
-          });
-          doc.text("Amount", colSubX + 4, y + headerTextYOffset, {
-            width: colSubW - 8,
-            align: "right",
-          });
-          y += headerDrawH;
-          doc.moveTo(tableLeft, y).lineTo(tableRightX, y).stroke();
-
-          totalTableHeight = 0;
-        }
-
-        y += minRowH;
-        totalTableHeight += minRowH;
-      }
-      filledHeight = totalTableHeight;
-    }
-
-    // draw vertical separators spanning header + content
-    const visualTableHeight = headerDrawH + filledHeight;
-    drawVerticalsForItemsBlock(tableStartY, visualTableHeight);
-    doc.rect(tableLeft, tableStartY, usableWidth, visualTableHeight).stroke();
-
-    // ===== Net Paid box after items =====
-    const netBoxW = 120;
-    const netBoxH = 28;
-    const netBoxX = tableRightX - netBoxW;
-    let netBoxY = tableStartY + visualTableHeight;
-
-    if (netBoxY + netBoxH + 60 > doc.page.height) {
-      doc.addPage();
-      drawPageBorder();
-      ({ contentLeft, contentTop, contentRight, usableWidth } =
-        computeContentArea());
-      y = contentTop;
-      drawPageHeader();
-      netBoxY = contentTop + 54;
-    }
-
-    doc.rect(netBoxX, netBoxY, netBoxW, netBoxH).stroke();
-    doc
-      .font("Helvetica-Bold")
-      .fontSize(9)
-      .text("Total", netBoxX + 6, netBoxY + 6, {
-        width: netBoxW - 12,
-        align: "left",
-      });
-    doc
-      .font("Helvetica")
-      .fontSize(9)
-      .text(`Rs ${formatMoney(netPaid)}`, netBoxX + 6, netBoxY + 6, {
-        width: netBoxW - 12,
-        align: "right",
-      });
-
-    if (netBoxY === tableStartY + visualTableHeight) {
-      y = netBoxY + netBoxH + 8;
-    } else {
-      y = netBoxY + netBoxH + 12;
-    }
-
-    // ---------- PAYMENT DETAILS HEADING ----------
-    doc.moveDown(0.2);
-    doc
-      .fontSize(10)
-      .font("Helvetica-Bold")
-      .text("Payment Details", contentLeft, y);
-    y += 16;
-
-    // ---------- PAYMENT DETAILS TABLE (Date column removed) ----------
-    const pTableLeft = contentLeft;
-
-    const pColPaymentDateW = 70;
-    const pColRecW = 100;
-    const pColModeW = 60;
-    const pColBankW = 100;
-    const pColRefW = 130;
-    const pColAmtW =
-      usableWidth -
-      (pColPaymentDateW +
-        pColRecW +
-        pColModeW +
-        pColBankW +
-        pColRefW);
-
-    const pColPaymentDateX = pTableLeft;
-    const pColRecX = pColPaymentDateX + pColPaymentDateW;
-    const pColModeX = pColRecX + pColRecW;
-    const pColBankX = pColModeX + pColModeW;
-    const pColRefX = pColBankX + pColBankW;
-    const pColAmtX = pColRefX + pColRefW;
-    const pTableRightX = pTableLeft + usableWidth;
-
-    const pHeaderH = 14;
-    const pHeaderDrawH = pHeaderH + headerPadding * 2;
-    const pMinRowH = 12;
-    const pMinTableH = 90;
-    const pBottomSafety = 100;
-
-    function drawVerticalsForPaymentsBlock(yTop, height) {
-      const xs = [
-        pColPaymentDateX,
-        pColRecX,
-        pColModeX,
-        pColBankX,
-        pColRefX,
-        pColAmtX,
-        pTableRightX,
-      ];
-      xs.forEach((x) => {
-        doc
-          .moveTo(x, yTop)
-          .lineTo(x, yTop + height)
-          .stroke();
-      });
-    }
-
-    // payments table header placement
-    let pTableStartY = y;
-    doc
-      .save()
-      .rect(pTableLeft, y, usableWidth, pHeaderDrawH)
-      .fill("#F3F3F3")
-      .restore();
-    doc.font("Helvetica-Bold").fontSize(9);
-    const pHeaderTextYOffset = headerPadding + 3;
-
-    doc.text("Payment Date", pColPaymentDateX + 4, y + pHeaderTextYOffset, {
-      width: pColPaymentDateW - 8,
-    });
-    doc.text("Receipt No.", pColRecX + 4, y + pHeaderTextYOffset, {
-      width: pColRecW - 8,
-    });
-    doc.text("Mode", pColModeX + 4, y + pHeaderTextYOffset, {
-      width: pColModeW - 8,
-    });
-    doc.text("Bank Name / UPI ID", pColBankX + 4, y + pHeaderTextYOffset, {
-      width: pColBankW - 8,
-    });
-    doc.text("Reference / Cheque No.", pColRefX + 4, y + pHeaderTextYOffset, {
-      width: pColRefW - 8,
-    });
-    doc.text("Amount", pColAmtX + 4, y + pHeaderTextYOffset, {
-      width: pColAmtW - 8,
-      align: "right",
-    });
-
-    y += pHeaderDrawH;
-    doc.moveTo(pTableLeft, y).lineTo(pTableRightX, y).stroke();
-
-    // render payments rows
-    doc.font("Helvetica").fontSize(9);
-    let pFilledHeight = 0;
-    for (let i = 0; i < payments.length; i++) {
-      const p = payments[i];
-
-      const paymentDateText = formatDateOnly(p.paymentDate || "");
-
-      let transferDateText = "";
-      if (p.mode === "Cheque") {
-        transferDateText = formatDateOnly(p.chequeDate);
-      } else if (p.mode === "BankTransfer") {
-        transferDateText = formatDateOnly(p.transferDate);
-      } else if (p.mode === "UPI") {
-        transferDateText = formatDateOnly(p.upiDate);
-      } else {
-        transferDateText = "";
-      }
-
-      const receiptText = p.receiptNo || p.id || "";
-      let modeText = p.mode || "-";
-      if (
-        (modeText === "BankTransfer" ||
-          (modeText && modeText.toLowerCase().includes("bank"))) &&
-        p.transferType
-      ) {
-        modeText = `Bank (${p.transferType})`;
-      }
-      let bankText = "-";
-      let refText = "-";
-
-      if (p.mode === "Cheque") {
-        refText = p.chequeNumber || p.referenceNo || "-";
-        bankText = p.bankName || "-";
-      } else if (p.mode === "UPI") {
-        bankText = p.upiId || "-";
-        refText = p.referenceNo || "-";
-      } else {
-        bankText = p.bankName || "-";
-        refText = p.referenceNo || "-";
-      }
-
-      const amtText = formatMoney(p.amount || 0);
-
-      const pdH = doc.heightOfString(paymentDateText, {
-        width: pColPaymentDateW - 8,
-      });
-      const rH = doc.heightOfString(receiptText, {
-        width: pColRecW - 8,
-      });
-      const mH = doc.heightOfString(modeText, {
-        width: pColModeW - 8,
-      });
-      const bH = doc.heightOfString(bankText, {
-        width: pColBankW - 8,
-      });
-      const refH = doc.heightOfString(refText, {
-        width: pColRefW - 8,
-      });
-      const aH = doc.heightOfString(amtText, {
-        width: pColAmtW - 8,
-      });
-
-      const maxH = Math.max(pdH, rH, mH, bH, refH, aH);
-      const thisRowH = Math.max(pMinRowH, maxH + 6);
-
-      // page-break check
-      if (y + thisRowH > doc.page.height - pBottomSafety) {
-        const paymentsVisualHeightSoFar = pHeaderDrawH + pFilledHeight;
-        if (paymentsVisualHeightSoFar > 0) {
-          drawVerticalsForPaymentsBlock(pTableStartY, paymentsVisualHeightSoFar);
-          doc
-            .rect(
-              pTableLeft,
-              pTableStartY,
-              usableWidth,
-              paymentsVisualHeightSoFar
-            )
-            .stroke();
-        }
-
-        doc.addPage();
-        drawPageBorder();
-        ({ contentLeft, contentTop, contentRight, usableWidth } =
-          computeContentArea());
-        y = contentTop;
-
-        // redraw header area/context
-        drawPageHeader();
-
-        // payments header on new page
-        pTableStartY = y;
-        doc
-          .save()
-          .rect(pTableLeft, y, usableWidth, pHeaderDrawH)
-          .fill("#F3F3F3")
-          .restore();
-        doc.font("Helvetica-Bold").fontSize(9);
-        doc.text(
-          "Payment Date",
-          pColPaymentDateX + 4,
-          y + pHeaderTextYOffset,
-          {
-            width: pColPaymentDateW - 8,
-          }
-        );
-        doc.text("Receipt No.", pColRecX + 4, y + pHeaderTextYOffset, {
-          width: pColRecW - 8,
-        });
-        doc.text("Mode", pColModeX + 4, y + pHeaderTextYOffset, {
-          width: pColModeW - 8,
-        });
-        doc.text(
-          "Bank Name / UPI ID",
-          pColBankX + 4,
-          y + pHeaderTextYOffset,
-          {
-            width: pColBankW - 8,
-          }
-        );
-        doc.text(
-          "Reference / Cheque No.",
-          pColRefX + 4,
-          y + pHeaderTextYOffset,
-          {
-            width: pColRefW - 8,
-          }
-        );
-        doc.text("Amount", pColAmtX + 4, y + pHeaderTextYOffset, {
-          width: pColAmtW - 8,
-          align: "right",
-        });
-        y += pHeaderDrawH;
-        doc.moveTo(pTableLeft, y).lineTo(pTableRightX, y).stroke();
-
-        pFilledHeight = 0;
-      }
-
-      // draw cells
-      const rowTop = y;
-      const pdY = rowTop + (thisRowH - pdH) / 2;
-      const recY = rowTop + (thisRowH - rH) / 2;
-      const modeY = rowTop + (thisRowH - mH) / 2;
-      const bankY = rowTop + (thisRowH - bH) / 2;
-      const refY = rowTop + (thisRowH - refH) / 2;
-      const amtY = rowTop + (thisRowH - aH) / 2;
-
-      doc.text(paymentDateText, pColPaymentDateX + 4, pdY, {
-        width: pColPaymentDateW - 8,
-      });
-      doc.text(receiptText, pColRecX + 4, recY, {
-        width: pColRecW - 8,
-      });
-      doc.text(modeText, pColModeX + 4, modeY, {
-        width: pColModeW - 8,
-      });
-      doc.text(bankText, pColBankX + 4, bankY, {
-        width: pColBankW - 8,
-      });
-      doc.text(refText, pColRefX + 4, refY, {
-        width: pColRefW - 8,
-      });
-      doc.text(amtText, pColAmtX + 4, amtY, {
-        width: pColAmtW - 8,
-        align: "right",
-      });
-
-      y += thisRowH;
-      pFilledHeight += thisRowH;
-    }
-
-    // ensure payments block minimum visual height (filler rows)
-    if (pFilledHeight < pMinTableH) {
-      const need = pMinTableH - pFilledHeight;
-      const fillerCount = Math.ceil(need / pMinRowH);
-      for (let f = 0; f < fillerCount; f++) {
-        if (y + pMinRowH > doc.page.height - pBottomSafety) {
-          const paymentsVisualHeightSoFar = pHeaderDrawH + pFilledHeight;
-          if (paymentsVisualHeightSoFar > 0) {
-            drawVerticalsForPaymentsBlock(
-              pTableStartY,
-              paymentsVisualHeightSoFar
-            );
-            doc
-              .rect(
-                pTableLeft,
-                pTableStartY,
-                usableWidth,
-                paymentsVisualHeightSoFar
-              )
-              .stroke();
-          }
-          doc.addPage();
-          drawPageBorder();
-          ({ contentLeft, contentTop, contentRight, usableWidth } =
-            computeContentArea());
-          y = contentTop;
-
-          // redraw page header and payments header
-          drawPageHeader();
-          pTableStartY = y;
-          doc
-            .save()
-            .rect(pTableLeft, y, usableWidth, pHeaderDrawH)
-            .fill("#F3F3F3")
-            .restore();
-          doc.font("Helvetica-Bold").fontSize(9);
-          doc.text(
-            "Payment Date",
-            pColPaymentDateX + 4,
-            y + pHeaderTextYOffset,
-            {
-              width: pColPaymentDateW - 8,
-            }
-          );
-          doc.text("Receipt No.", pColRecX + 4, y + pHeaderTextYOffset, {
-            width: pColRecW - 8,
-          });
-          doc.text("Mode", pColModeX + 4, y + pHeaderTextYOffset, {
-            width: pColModeW - 8,
-          });
-          doc.text(
-            "Bank Name / UPI ID",
-            pColBankX + 4,
-            y + pHeaderTextYOffset,
-            {
-              width: pColBankW - 8,
-            }
-          );
-          doc.text(
-            "Reference / Cheque No.",
-            pColRefX + 4,
-            y + pHeaderTextYOffset,
-            {
-              width: pColRefW - 8,
-            }
-          );
-          doc.text("Amount", pColAmtX + 4, y + pHeaderTextYOffset, {
-            width: pColAmtW - 8,
-            align: "right",
-          });
-          y += pHeaderDrawH;
-          doc.moveTo(pTableLeft, y).lineTo(pTableRightX, y).stroke();
-
-          pFilledHeight = 0;
-        }
-
-        y += pMinRowH;
-        pFilledHeight += pMinRowH;
-      }
-    }
-
-    // finalize payments block visuals
-    if (pFilledHeight > 0) {
-      const paymentsVisualHeight = pHeaderDrawH + pFilledHeight;
-      drawVerticalsForPaymentsBlock(pTableStartY, paymentsVisualHeight);
-      doc
-        .rect(pTableLeft, pTableStartY, usableWidth, paymentsVisualHeight)
-        .stroke();
-      y = pTableStartY + paymentsVisualHeight + 12;
-    }
-
-    // ---------- NOTE + TOTALS BOX ----------
-    const boxWidth2 = 200;
-    const noteText =
-      "* This receipt is generated by the Madhurekha Eye Care Centre. Disputes if any is subjected to Jamshedpur jurisdiction.";
-
-    const spaceForNote = usableWidth - boxWidth2 - 12;
-    const noteWidth = Math.max(120, Math.min(spaceForNote, usableWidth - 12));
-
-    doc
-      .fontSize(8)
-      .font("Helvetica")
-      .text(noteText, contentLeft, y, { width: noteWidth });
-
-    const boxX2 = contentRight - boxWidth2;
-    const boxY2 = y;
-
-    const lineH = 14;
-    const rowsCount = 4;
-    const boxHeight2 = rowsCount * lineH + 8;
-
-    if (boxY2 + boxHeight2 + 60 > doc.page.height) {
-      doc.addPage();
-      drawPageBorder();
-      ({ contentLeft, contentTop, contentRight, usableWidth } =
-        computeContentArea());
-      y = contentTop;
-      drawPageHeader();
-      doc
-        .fontSize(8)
-        .font("Helvetica")
-        .text(noteText, contentLeft, y, {
-          width: Math.max(120, usableWidth - boxWidth2 - 12),
-        });
-    }
-
-    doc.rect(boxX2, boxY2, boxWidth2, boxHeight2).stroke();
-    let by = boxY2 + 6;
-    doc.font("Helvetica").fontSize(9);
-    const addRow = (label, value) => {
-      doc.text(label, boxX2 + 6, by);
-      doc.text(`Rs ${formatMoney(value)}`, boxX2 + 6, by, {
-        width: boxWidth2 - 12,
-        align: "right",
-      });
-      by += lineH;
-    };
-
-    addRow("Total", total);
-    addRow("Total Paid (gross)", totalPaidGross);
-    addRow("Total Refunded", totalRefunded);
-    addRow("Balance", balance);
-
-    y = Math.max(boxY2 + boxHeight2 + 20, y + 20);
-
-    // ---------- SIGNATURES ----------
-    const rightSigX = contentRight - 160;
-    doc
-      .moveTo(rightSigX, y + 28)
-      .lineTo(rightSigX + 160, y + 28)
-      .dash(1, { space: 2 })
-      .stroke()
-      .undash();
-    doc.fontSize(8).text(clinicRepresentative || "", rightSigX, y + 32, {
-      width: 160,
-      align: "center",
-    });
-
-    doc.end();
-  } catch (err) {
-    console.error("full-payment-pdf error:", err);
-    if (!res.headersSent) {
-      res.status(500).json({ error: "Failed to generate full payment PDF" });
-    } else {
-      try {
-        res.end();
-      } catch (e) {}
-    }
-  }
-});
-
-
-app.get("/api/profile", async (_req, res) => {
-  try {
-    const key = makeCacheKey("profile", "clinic");
-    const data = await getOrSetCache(key, 120, async () => {
-      const profileRef = db.collection("settings").doc("clinicProfile");
-      const profileSnap = await profileRef.get();
-
-      if (!profileSnap.exists) {
-        // Return null if profile doesn't exist (first time setup)
-        return { exists: false };
-      }
-
-      return { exists: true, ...profileSnap.data() };
-    });
-
-    res.json(data);
-  } catch (err) {
-    console.error("GET /api/profile error:", err);
-    res.status(500).json({ error: "Failed to fetch profile" });
-  }
-});
-
-// ---------- PUT /api/profile (update clinic profile) ----------
-app.put("/api/profile", async (req, res) => {
-  try {
-    const {
-      session,
-      clinicName,
-      address,
-      pan,
-      regNo,
-      doctor1Name,
-      doctor1RegNo,
-      doctor2Name,
-      doctor2RegNo,
-      patientRepresentative,
-      clinicRepresentative,
-      phone,
-      email,
-      website,
-    } = req.body;
-
-    const profileData = {
-      session: session || "",
-      clinicName: clinicName || "",
-      address: address || "",
-      pan: pan || "",
-      regNo: regNo || "",
-      doctor1Name: doctor1Name || "",
-      doctor1RegNo: doctor1RegNo || "",
-      doctor2Name: doctor2Name || "",
-      doctor2RegNo: doctor2RegNo || "",
-      patientRepresentative: patientRepresentative || "",
-      clinicRepresentative: clinicRepresentative || "",
-      phone: phone || "",
-      email: email || "",
-      website: website || "",
-      updatedAt: new Date().toISOString(),
-    };
-
-    const profileRef = db.collection("settings").doc("clinicProfile");
-    await profileRef.set(profileData, { merge: true });
-
-    // Clear cache
-    cache.flushAll();
-
-    // Sync to Google Sheet (optional - add this function to sheetIntregation.js)
-    try {
-      syncProfileToSheet(profileData);
-    } catch (sheetErr) {
-      console.warn("Sheet sync failed for profile:", sheetErr);
-    }
-
-    res.json({
-      success: true,
-      message: "Profile updated successfully",
-      profile: profileData,
-    });
-  } catch (err) {
-    console.error("PUT /api/profile error:", err);
-    res.status(500).json({ error: "Failed to update profile" });
-  }
-});
 
 // ---------- START SERVER ----------
 app.listen(PORT, () => {
