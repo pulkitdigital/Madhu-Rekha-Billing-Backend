@@ -395,69 +395,289 @@ app.get("/api/dashboard/summary", async (_req, res) => {
 });
 
 // ---------- GET /api/bills ----------
+// app.get("/api/bills", async (_req, res) => {
+//   try {
+//     const key = makeCacheKey("bills", "list");
+
+//     const data = await getOrSetCache(key, 3, async () => {
+//       const billsSnap = await db
+//         .collection("bills")
+//         .orderBy("invoiceNo", "desc")
+//         .get();
+
+//       const result = [];
+
+//       for (const doc of billsSnap.docs) {
+//         const b = doc.data();
+//         const billId = doc.id;
+
+//         const total = Number(b.total || 0);
+//         const isProcedureCompleted = b.procedureConfirmed === true;
+
+//         // ---------------- PAYMENTS (GROSS) ----------------
+//         const paysSnap = await db
+//           .collection("payments")
+//           .where("billId", "==", billId)
+//           .get();
+
+//         const paidGross = paysSnap.docs.reduce(
+//           (sum, d) => sum + Number(d.data().amount || 0),
+//           0,
+//         );
+
+//         // ---------------- REFUNDS ----------------
+//         const refundsSnap = await db
+//           .collection("refunds")
+//           .where("billId", "==", billId)
+//           .get();
+
+//         const refunded = refundsSnap.docs.reduce(
+//           (sum, d) => sum + Number(d.data().amount || 0),
+//           0,
+//         );
+
+//         // ---------------- NET CALCULATION ----------------
+//         const paidNet = Math.max(paidGross - refunded, 0);
+
+//         // 🔥 BUSINESS OVERRIDE
+//         // Procedure done = balance must be ZERO no matter what
+//         const balance = isProcedureCompleted ? 0 : Math.max(total - paidNet, 0);
+
+//         result.push({
+//           id: billId,
+//           invoiceNo: b.invoiceNo || billId,
+//           patientName: b.patientName || "",
+//           date: formatDateDot(b.date || null),
+
+//           total,
+//           paid: paidNet, // NET PAID (2000 / 500 etc)
+//           refunded,
+//           balance,
+
+//           procedureConfirmed: isProcedureCompleted, // ✅ REQUIRED BY UI
+//           status: isProcedureCompleted || balance <= 0 ? "PAID" : "PENDING",
+//         });
+//       }
+
+//       return result;
+//     });
+
+//     res.json(data);
+//   } catch (err) {
+//     console.error("GET /api/bills error:", err);
+//     res.status(500).json({ error: "Failed to fetch bills" });
+//   }
+// });
+
+// ---------- GET /api/bills (OPTIMIZED) ----------
+// app.get("/api/bills", async (_req, res) => {
+//   try {
+//     const key = makeCacheKey("bills", "list");
+
+//     const data = await getOrSetCache(key, 300, async () => { // ✅ Cache 5 minutes
+//       const billsSnap = await db
+//         .collection("bills")
+//         .orderBy("invoiceNo", "desc")
+//         .get();
+
+//       if (billsSnap.empty) {
+//         return [];
+//       }
+
+//       // ✅ Step 1: Collect all bill IDs
+//       const billIds = billsSnap.docs.map(doc => doc.id);
+
+//       // ✅ Step 2: Batch fetch ALL payments and refunds in parallel
+//       // Firestore 'in' query limit is 10, so we need to chunk if > 10 bills
+//       const chunkSize = 10;
+//       const chunks = [];
+//       for (let i = 0; i < billIds.length; i += chunkSize) {
+//         chunks.push(billIds.slice(i, i + chunkSize));
+//       }
+
+//       // Fetch payments for all chunks in parallel
+//       const paymentsPromises = chunks.map(chunk =>
+//         db.collection("payments").where("billId", "in", chunk).get()
+//       );
+
+//       // Fetch refunds for all chunks in parallel
+//       const refundsPromises = chunks.map(chunk =>
+//         db.collection("refunds").where("billId", "in", chunk).get()
+//       );
+
+//       // Execute all queries in parallel
+//       const [paymentsSnapshots, refundsSnapshots] = await Promise.all([
+//         Promise.all(paymentsPromises),
+//         Promise.all(refundsPromises)
+//       ]);
+
+//       // ✅ Step 3: Build lookup maps (billId -> total amount)
+//       const paymentsMap = {}; // { billId: totalPaid }
+//       const refundsMap = {};  // { billId: totalRefunded }
+
+//       paymentsSnapshots.forEach(snap => {
+//         snap.docs.forEach(doc => {
+//           const data = doc.data();
+//           const billId = data.billId;
+//           const amount = Number(data.amount || 0);
+//           paymentsMap[billId] = (paymentsMap[billId] || 0) + amount;
+//         });
+//       });
+
+//       refundsSnapshots.forEach(snap => {
+//         snap.docs.forEach(doc => {
+//           const data = doc.data();
+//           const billId = data.billId;
+//           const amount = Number(data.amount || 0);
+//           refundsMap[billId] = (refundsMap[billId] || 0) + amount;
+//         });
+//       });
+
+//       // ✅ Step 4: Build result array using the maps (no more queries!)
+//       const result = billsSnap.docs.map(doc => {
+//         const b = doc.data();
+//         const billId = doc.id;
+
+//         const total = Number(b.total || 0);
+//         const isProcedureCompleted = b.procedureConfirmed === true;
+
+//         // Get pre-computed totals from maps
+//         const paidGross = paymentsMap[billId] || 0;
+//         const refunded = refundsMap[billId] || 0;
+//         const paidNet = Math.max(paidGross - refunded, 0);
+
+//         // Business logic override
+//         const balance = isProcedureCompleted ? 0 : Math.max(total - paidNet, 0);
+
+//         return {
+//           id: billId,
+//           invoiceNo: b.invoiceNo || billId,
+//           patientName: b.patientName || "",
+//           date: formatDateDot(b.date || null),
+
+//           total,
+//           paid: paidNet,
+//           refunded,
+//           balance,
+
+//           procedureConfirmed: isProcedureCompleted,
+//           status: isProcedureCompleted || balance <= 0 ? "PAID" : "PENDING",
+//         };
+//       });
+
+//       return result;
+//     });
+
+//     res.json(data);
+//   } catch (err) {
+//     console.error("GET /api/bills error:", err);
+//     res.status(500).json({ error: "Failed to fetch bills" });
+//   }
+// });
+// server.js - Line ~357
 app.get("/api/bills", async (_req, res) => {
   try {
     const key = makeCacheKey("bills", "list");
 
-    const data = await getOrSetCache(key, 3, async () => {
+    const data = await getOrSetCache(key, 300, async () => {
       const billsSnap = await db
         .collection("bills")
         .orderBy("invoiceNo", "desc")
         .get();
 
-      const result = [];
+      if (billsSnap.empty) {
+        return [];
+      }
 
-      for (const doc of billsSnap.docs) {
+      const billIds = billsSnap.docs.map(doc => doc.id);
+      const chunkSize = 10;
+      const chunks = [];
+      for (let i = 0; i < billIds.length; i += chunkSize) {
+        chunks.push(billIds.slice(i, i + chunkSize));
+      }
+
+      // ✅ Fetch payments
+      const paymentsPromises = chunks.map(chunk =>
+        db.collection("payments").where("billId", "in", chunk).get()
+      );
+
+      const refundsPromises = chunks.map(chunk =>
+        db.collection("refunds").where("billId", "in", chunk).get()
+      );
+
+      const [paymentsSnapshots, refundsSnapshots] = await Promise.all([
+        Promise.all(paymentsPromises),
+        Promise.all(refundsPromises)
+      ]);
+
+      const paymentsMap = {};
+      const refundsMap = {};
+      
+      // ✅ NEW: Store payment details (not just totals)
+      const paymentDetailsMap = {}; // { billId: [payment objects] }
+
+      paymentsSnapshots.forEach(snap => {
+        snap.docs.forEach(doc => {
+          const data = doc.data();
+          const billId = data.billId;
+          const amount = Number(data.amount || 0);
+          
+          paymentsMap[billId] = (paymentsMap[billId] || 0) + amount;
+          
+          // ✅ Store payment details
+          if (!paymentDetailsMap[billId]) {
+            paymentDetailsMap[billId] = [];
+          }
+          paymentDetailsMap[billId].push({
+            id: doc.id,
+            type: "Payment",
+            amount: amount,
+            paymentDate: data.paymentDate,
+            paymentDateTime: data.paymentDateTime || 
+              (data.paymentDate ? `${data.paymentDate}T00:00:00.000Z` : null)
+          });
+        });
+      });
+
+      refundsSnapshots.forEach(snap => {
+        snap.docs.forEach(doc => {
+          const data = doc.data();
+          const billId = data.billId;
+          const amount = Number(data.amount || 0);
+          refundsMap[billId] = (refundsMap[billId] || 0) + amount;
+        });
+      });
+
+      const result = billsSnap.docs.map(doc => {
         const b = doc.data();
         const billId = doc.id;
 
         const total = Number(b.total || 0);
         const isProcedureCompleted = b.procedureConfirmed === true;
 
-        // ---------------- PAYMENTS (GROSS) ----------------
-        const paysSnap = await db
-          .collection("payments")
-          .where("billId", "==", billId)
-          .get();
-
-        const paidGross = paysSnap.docs.reduce(
-          (sum, d) => sum + Number(d.data().amount || 0),
-          0,
-        );
-
-        // ---------------- REFUNDS ----------------
-        const refundsSnap = await db
-          .collection("refunds")
-          .where("billId", "==", billId)
-          .get();
-
-        const refunded = refundsSnap.docs.reduce(
-          (sum, d) => sum + Number(d.data().amount || 0),
-          0,
-        );
-
-        // ---------------- NET CALCULATION ----------------
+        const paidGross = paymentsMap[billId] || 0;
+        const refunded = refundsMap[billId] || 0;
         const paidNet = Math.max(paidGross - refunded, 0);
-
-        // 🔥 BUSINESS OVERRIDE
-        // Procedure done = balance must be ZERO no matter what
         const balance = isProcedureCompleted ? 0 : Math.max(total - paidNet, 0);
 
-        result.push({
+        return {
           id: billId,
           invoiceNo: b.invoiceNo || billId,
           patientName: b.patientName || "",
           date: formatDateDot(b.date || null),
 
           total,
-          paid: paidNet, // NET PAID (2000 / 500 etc)
+          paid: paidNet,
           refunded,
           balance,
 
-          procedureConfirmed: isProcedureCompleted, // ✅ REQUIRED BY UI
+          procedureConfirmed: isProcedureCompleted,
           status: isProcedureCompleted || balance <= 0 ? "PAID" : "PENDING",
-        });
-      }
+          
+          // ✅ ADD PAYMENTS ARRAY
+          payments: paymentDetailsMap[billId] || []
+        };
+      });
 
       return result;
     });
@@ -715,182 +935,182 @@ app.post("/api/bills", async (req, res) => {
   }
 });
 
-app.get("/api/bills/:id", async (req, res) => {
-  const id = req.params.id;
-  if (!id) return res.status(400).json({ error: "Invalid bill id" });
+// app.get("/api/bills/:id", async (req, res) => {
+//   const id = req.params.id;
+//   if (!id) return res.status(400).json({ error: "Invalid bill id" });
 
-  try {
-    const key = makeCacheKey("bill-detail", id);
-    const data = await getOrSetCache(key, 3, async () => {
-      const billRef = db.collection("bills").doc(id);
-      const billSnap = await billRef.get();
-      if (!billSnap.exists) {
-        throw new Error("NOT_FOUND");
-      }
+//   try {
+//     const key = makeCacheKey("bill-detail", id);
+//     const data = await getOrSetCache(key, 3, async () => {
+//       const billRef = db.collection("bills").doc(id);
+//       const billSnap = await billRef.get();
+//       if (!billSnap.exists) {
+//         throw new Error("NOT_FOUND");
+//       }
 
-      const bill = billSnap.data();
+//       const bill = billSnap.data();
 
-      // ---------------- ITEMS ----------------
-      const itemsSnap = await db
-        .collection("items")
-        .where("billId", "==", id)
-        .get();
+//       // ---------------- ITEMS ----------------
+//       const itemsSnap = await db
+//         .collection("items")
+//         .where("billId", "==", id)
+//         .get();
 
-      const items = itemsSnap.docs.map((doc) => ({
-        id: doc.id,
-        ...doc.data(),
-      }));
+//       const items = itemsSnap.docs.map((doc) => ({
+//         id: doc.id,
+//         ...doc.data(),
+//       }));
 
-      // ---------------- PAYMENTS ----------------
-      const paysSnap = await db
-        .collection("payments")
-        .where("billId", "==", id)
-        .get();
+//       // ---------------- PAYMENTS ----------------
+//       const paysSnap = await db
+//         .collection("payments")
+//         .where("billId", "==", id)
+//         .get();
 
-      let payments = paysSnap.docs.map((doc) => {
-        const d = doc.data();
-        const paymentDateTime =
-          d.paymentDateTime ||
-          (d.paymentDate ? `${d.paymentDate}T00:00:00.000Z` : null);
+//       let payments = paysSnap.docs.map((doc) => {
+//         const d = doc.data();
+//         const paymentDateTime =
+//           d.paymentDateTime ||
+//           (d.paymentDate ? `${d.paymentDate}T00:00:00.000Z` : null);
 
-        return {
-          id: doc.id,
-          amount: Number(d.amount || 0),
-          mode: d.mode || "",
-          referenceNo: d.referenceNo || null,
-          receiptNo: d.receiptNo || null,
-          date: formatDateDot(d.paymentDate || null),
-          time: d.paymentTime || null,
-          paymentDateTime,
-          drawnOn: d.drawnOn || null,
-          drawnAs: d.drawnAs || null,
+//         return {
+//           id: doc.id,
+//           amount: Number(d.amount || 0),
+//           mode: d.mode || "",
+//           referenceNo: d.referenceNo || null,
+//           receiptNo: d.receiptNo || null,
+//           date: formatDateDot(d.paymentDate || null),
+//           time: d.paymentTime || null,
+//           paymentDateTime,
+//           drawnOn: d.drawnOn || null,
+//           drawnAs: d.drawnAs || null,
 
-          chequeDate: d.chequeDate || null,
-          chequeNumber: d.chequeNumber || null,
-          bankName: d.bankName || null,
+//           chequeDate: d.chequeDate || null,
+//           chequeNumber: d.chequeNumber || null,
+//           bankName: d.bankName || null,
 
-          transferType: d.transferType || null,
-          transferDate: d.transferDate || null,
+//           transferType: d.transferType || null,
+//           transferDate: d.transferDate || null,
 
-          upiName: d.upiName || null,
-          upiId: d.upiId || null,
-          upiDate: d.upiDate || null,
-        };
-      });
+//           upiName: d.upiName || null,
+//           upiId: d.upiId || null,
+//           upiDate: d.upiDate || null,
+//         };
+//       });
 
-      payments.sort((a, b) => {
-        const da = a.paymentDateTime
-          ? new Date(a.paymentDateTime)
-          : new Date(0);
-        const dbb = b.paymentDateTime
-          ? new Date(b.paymentDateTime)
-          : new Date(0);
-        return da - dbb;
-      });
+//       payments.sort((a, b) => {
+//         const da = a.paymentDateTime
+//           ? new Date(a.paymentDateTime)
+//           : new Date(0);
+//         const dbb = b.paymentDateTime
+//           ? new Date(b.paymentDateTime)
+//           : new Date(0);
+//         return da - dbb;
+//       });
 
-      const totalPaidGross = payments.reduce(
-        (sum, p) => sum + Number(p.amount || 0),
-        0,
-      );
+//       const totalPaidGross = payments.reduce(
+//         (sum, p) => sum + Number(p.amount || 0),
+//         0,
+//       );
 
-      // ---------------- REFUNDS ----------------
-      const refundsSnap = await db
-        .collection("refunds")
-        .where("billId", "==", id)
-        .get();
+//       // ---------------- REFUNDS ----------------
+//       const refundsSnap = await db
+//         .collection("refunds")
+//         .where("billId", "==", id)
+//         .get();
 
-      let refunds = refundsSnap.docs.map((doc) => {
-        const d = doc.data();
-        const refundDateTime =
-          d.refundDateTime ||
-          (d.refundDate ? `${d.refundDate}T00:00:00.000Z` : null);
+//       let refunds = refundsSnap.docs.map((doc) => {
+//         const d = doc.data();
+//         const refundDateTime =
+//           d.refundDateTime ||
+//           (d.refundDate ? `${d.refundDate}T00:00:00.000Z` : null);
 
-        return {
-          id: doc.id,
-          amount: Number(d.amount || 0),
-          mode: d.mode || "",
-          referenceNo: d.referenceNo || null,
-          refundNo: d.refundReceiptNo || null,
-          date: formatDateDot(d.refundDate || null),
-          time: d.refundTime || null,
-          refundDateTime,
-          drawnOn: d.drawnOn || null,
-          drawnAs: d.drawnAs || null,
+//         return {
+//           id: doc.id,
+//           amount: Number(d.amount || 0),
+//           mode: d.mode || "",
+//           referenceNo: d.referenceNo || null,
+//           refundNo: d.refundReceiptNo || null,
+//           date: formatDateDot(d.refundDate || null),
+//           time: d.refundTime || null,
+//           refundDateTime,
+//           drawnOn: d.drawnOn || null,
+//           drawnAs: d.drawnAs || null,
 
-          chequeDate: d.chequeDate || null,
-          chequeNumber: d.chequeNumber || null,
-          bankName: d.bankName || null,
+//           chequeDate: d.chequeDate || null,
+//           chequeNumber: d.chequeNumber || null,
+//           bankName: d.bankName || null,
 
-          transferType: d.transferType || null,
-          transferDate: d.transferDate || null,
+//           transferType: d.transferType || null,
+//           transferDate: d.transferDate || null,
 
-          upiName: d.upiName || null,
-          upiId: d.upiId || null,
-          upiDate: d.upiDate || null,
-        };
-      });
+//           upiName: d.upiName || null,
+//           upiId: d.upiId || null,
+//           upiDate: d.upiDate || null,
+//         };
+//       });
 
-      refunds.sort((a, b) => {
-        const da = a.refundDateTime ? new Date(a.refundDateTime) : new Date(0);
-        const dbb = b.refundDateTime ? new Date(b.refundDateTime) : new Date(0);
-        return da - dbb;
-      });
+//       refunds.sort((a, b) => {
+//         const da = a.refundDateTime ? new Date(a.refundDateTime) : new Date(0);
+//         const dbb = b.refundDateTime ? new Date(b.refundDateTime) : new Date(0);
+//         return da - dbb;
+//       });
 
-      const totalRefunded = refunds.reduce(
-        (sum, r) => sum + Number(r.amount || 0),
-        0,
-      );
+//       const totalRefunded = refunds.reduce(
+//         (sum, r) => sum + Number(r.amount || 0),
+//         0,
+//       );
 
-      // ---------------- FINAL CALCULATION ----------------
-      const total = Number(bill.total || 0);
-      const netPaid = totalPaidGross - totalRefunded;
-      const balance = total - netPaid;
-      const status = computeStatus(total, netPaid);
+//       // ---------------- FINAL CALCULATION ----------------
+//       const total = Number(bill.total || 0);
+//       const netPaid = totalPaidGross - totalRefunded;
+//       const balance = total - netPaid;
+//       const status = computeStatus(total, netPaid);
 
-      const primaryPayment = payments[0] || null;
+//       const primaryPayment = payments[0] || null;
 
-      // ---------------- RESPONSE ----------------
-      return {
-        id,
-        invoiceNo: bill.invoiceNo || id,
-        patientName: bill.patientName || "",
-        sex: bill.sex || null,
-        address: bill.address || "",
-        age: bill.age || null,
-        date: bill.date || null,
-        procedureDone: bill.procedureDone || null,
-        procedureConfirmed: bill.procedureConfirmed || false, // ✅ ADD THIS LINE
+//       // ---------------- RESPONSE ----------------
+//       return {
+//         id,
+//         invoiceNo: bill.invoiceNo || id,
+//         patientName: bill.patientName || "",
+//         sex: bill.sex || null,
+//         address: bill.address || "",
+//         age: bill.age || null,
+//         date: bill.date || null,
+//         procedureDone: bill.procedureDone || null,
+//         procedureConfirmed: bill.procedureConfirmed || false, // ✅ ADD THIS LINE
 
-        total,
-        paid: netPaid, // ✅ NET PAID
-        totalPaid: totalPaidGross, // ✅ GROSS PAID
-        refunded: totalRefunded,
-        balance,
-        status,
+//         total,
+//         paid: netPaid, // ✅ NET PAID
+//         totalPaid: totalPaidGross, // ✅ GROSS PAID
+//         refunded: totalRefunded,
+//         balance,
+//         status,
 
-        remarks: bill.remarks || null,
-        services: bill.services || null,
+//         remarks: bill.remarks || null,
+//         services: bill.services || null,
 
-        items,
-        payments,
-        refunds,
+//         items,
+//         payments,
+//         refunds,
 
-        paymentMode: primaryPayment?.mode || null,
-        referenceNo: primaryPayment?.referenceNo || null,
-        drawnOn: primaryPayment?.drawnOn || null,
-        drawnAs: primaryPayment?.drawnAs || null,
-      };
-    });
+//         paymentMode: primaryPayment?.mode || null,
+//         referenceNo: primaryPayment?.referenceNo || null,
+//         drawnOn: primaryPayment?.drawnOn || null,
+//         drawnAs: primaryPayment?.drawnAs || null,
+//       };
+//     });
 
-    res.json(data);
-  } catch (err) {
-    if (err.message === "NOT_FOUND") {
-      return res.status(404).json({ error: "Bill not found" });
-    }
-    console.error("bill detail error:", err);
-    res.status(500).json({ error: "Failed to load bill" });
-  }
-});
+//     res.json(data);
+//   } catch (err) {
+//     if (err.message === "NOT_FOUND") {
+//       return res.status(404).json({ error: "Bill not found" });
+//     }
+//     console.error("bill detail error:", err);
+//     res.status(500).json({ error: "Failed to load bill" });
+//   }
+// });
 
 // app.patch("/api/bills/:id", async (req, res) => {
 //   const id = req.params.id;
@@ -963,6 +1183,175 @@ app.get("/api/bills/:id", async (req, res) => {
 //     res.status(500).json({ error: "Failed to update bill" });
 //   }
 // });
+
+// ---------- GET /api/bills/:id (OPTIMIZED) ----------
+app.get("/api/bills/:id", async (req, res) => {
+  const id = req.params.id;
+  if (!id) return res.status(400).json({ error: "Invalid bill id" });
+
+  try {
+    const key = makeCacheKey("bill-detail", id);
+    const data = await getOrSetCache(key, 300, async () => { // ✅ Cache 5 minutes
+      const billRef = db.collection("bills").doc(id);
+      const billSnap = await billRef.get();
+      
+      if (!billSnap.exists) {
+        throw new Error("NOT_FOUND");
+      }
+
+      const bill = billSnap.data();
+
+      // ✅ Fetch items, payments, refunds in PARALLEL (not sequential)
+      const [itemsSnap, paysSnap, refundsSnap] = await Promise.all([
+        db.collection("items").where("billId", "==", id).get(),
+        db.collection("payments").where("billId", "==", id).get(),
+        db.collection("refunds").where("billId", "==", id).get()
+      ]);
+
+      // ---------------- ITEMS ----------------
+      const items = itemsSnap.docs.map((doc) => ({
+        id: doc.id,
+        ...doc.data(),
+      }));
+
+      // ---------------- PAYMENTS ----------------
+      let payments = paysSnap.docs.map((doc) => {
+        const d = doc.data();
+        const paymentDateTime =
+          d.paymentDateTime ||
+          (d.paymentDate ? `${d.paymentDate}T00:00:00.000Z` : null);
+
+        return {
+          id: doc.id,
+          amount: Number(d.amount || 0),
+          mode: d.mode || "",
+          referenceNo: d.referenceNo || null,
+          receiptNo: d.receiptNo || null,
+          date: formatDateDot(d.paymentDate || null),
+          time: d.paymentTime || null,
+          paymentDateTime,
+          drawnOn: d.drawnOn || null,
+          drawnAs: d.drawnAs || null,
+
+          chequeDate: d.chequeDate || null,
+          chequeNumber: d.chequeNumber || null,
+          bankName: d.bankName || null,
+
+          transferType: d.transferType || null,
+          transferDate: d.transferDate || null,
+
+          upiName: d.upiName || null,
+          upiId: d.upiId || null,
+          upiDate: d.upiDate || null,
+        };
+      });
+
+      // ✅ Sort payments in memory (faster than Firestore orderBy)
+      payments.sort((a, b) => {
+        const da = a.paymentDateTime ? new Date(a.paymentDateTime) : new Date(0);
+        const db = b.paymentDateTime ? new Date(b.paymentDateTime) : new Date(0);
+        return da - db;
+      });
+
+      const totalPaidGross = payments.reduce(
+        (sum, p) => sum + Number(p.amount || 0),
+        0
+      );
+
+      // ---------------- REFUNDS ----------------
+      let refunds = refundsSnap.docs.map((doc) => {
+        const d = doc.data();
+        const refundDateTime =
+          d.refundDateTime ||
+          (d.refundDate ? `${d.refundDate}T00:00:00.000Z` : null);
+
+        return {
+          id: doc.id,
+          amount: Number(d.amount || 0),
+          mode: d.mode || "",
+          referenceNo: d.referenceNo || null,
+          refundNo: d.refundReceiptNo || null,
+          date: formatDateDot(d.refundDate || null),
+          time: d.refundTime || null,
+          refundDateTime,
+          drawnOn: d.drawnOn || null,
+          drawnAs: d.drawnAs || null,
+
+          chequeDate: d.chequeDate || null,
+          chequeNumber: d.chequeNumber || null,
+          bankName: d.bankName || null,
+
+          transferType: d.transferType || null,
+          transferDate: d.transferDate || null,
+
+          upiName: d.upiName || null,
+          upiId: d.upiId || null,
+          upiDate: d.upiDate || null,
+        };
+      });
+
+      // ✅ Sort refunds in memory
+      refunds.sort((a, b) => {
+        const da = a.refundDateTime ? new Date(a.refundDateTime) : new Date(0);
+        const db = b.refundDateTime ? new Date(b.refundDateTime) : new Date(0);
+        return da - db;
+      });
+
+      const totalRefunded = refunds.reduce(
+        (sum, r) => sum + Number(r.amount || 0),
+        0
+      );
+
+      // ---------------- FINAL CALCULATION ----------------
+      const total = Number(bill.total || 0);
+      const netPaid = totalPaidGross - totalRefunded;
+      const balance = total - netPaid;
+      const status = computeStatus(total, netPaid);
+
+      const primaryPayment = payments[0] || null;
+
+      // ---------------- RESPONSE ----------------
+      return {
+        id,
+        invoiceNo: bill.invoiceNo || id,
+        patientName: bill.patientName || "",
+        sex: bill.sex || null,
+        address: bill.address || "",
+        age: bill.age || null,
+        date: bill.date || null,
+        procedureDone: bill.procedureDone || null,
+        procedureConfirmed: bill.procedureConfirmed || false,
+
+        total,
+        paid: netPaid,
+        totalPaid: totalPaidGross,
+        refunded: totalRefunded,
+        balance,
+        status,
+
+        remarks: bill.remarks || null,
+        services: bill.services || null,
+
+        items,
+        payments,
+        refunds,
+
+        paymentMode: primaryPayment?.mode || null,
+        referenceNo: primaryPayment?.referenceNo || null,
+        drawnOn: primaryPayment?.drawnOn || null,
+        drawnAs: primaryPayment?.drawnAs || null,
+      };
+    });
+
+    res.json(data);
+  } catch (err) {
+    if (err.message === "NOT_FOUND") {
+      return res.status(404).json({ error: "Bill not found" });
+    }
+    console.error("bill detail error:", err);
+    res.status(500).json({ error: "Failed to load bill" });
+  }
+});
 
 app.patch("/api/bills/:id", async (req, res) => {
   const id = req.params.id;
@@ -1743,6 +2132,403 @@ app.get("/api/refunds/:id", async (req, res) => {
   } catch (err) {
     console.error("GET /api/refunds/:id error:", err);
     res.status(500).json({ error: "Failed to load refund" });
+  }
+});
+
+
+// server.js - Add this endpoint BEFORE app.listen()
+
+// ---------- GET /api/transactions (ALL PAYMENTS & REFUNDS) ----------
+app.get("/api/transactions", async (_req, res) => {
+  try {
+    const key = makeCacheKey("transactions", "all");
+
+    const data = await getOrSetCache(key, 300, async () => {
+      // ✅ Fetch ALL payments and refunds in parallel
+      const [paymentsSnap, refundsSnap, billsSnap] = await Promise.all([
+        db.collection("payments").orderBy("paymentDateTime", "desc").get(),
+        db.collection("refunds").orderBy("refundDateTime", "desc").get(),
+        db.collection("bills").get()
+      ]);
+
+      // ✅ Build a map of bills for quick lookup
+      const billsMap = {};
+      billsSnap.forEach(doc => {
+        const bill = doc.data();
+        billsMap[doc.id] = {
+          invoiceNo: bill.invoiceNo || doc.id,
+          patientName: bill.patientName || ""
+        };
+      });
+
+      // ✅ Format payments
+      const payments = paymentsSnap.docs.map(doc => {
+        const p = doc.data();
+        const bill = billsMap[p.billId] || {};
+        
+        return {
+          id: doc.id,
+          type: "Payment",
+          billId: p.billId,
+          invoiceNo: bill.invoiceNo || p.billId,
+          patientName: bill.patientName || "",
+          amount: Number(p.amount || 0),
+          mode: p.mode || "Cash",
+          date: formatDateDot(p.paymentDate || ""),
+          paymentDateTime: p.paymentDateTime || 
+            (p.paymentDate ? `${p.paymentDate}T00:00:00.000Z` : null),
+          receiptNo: p.receiptNo || doc.id,
+          referenceNo: p.referenceNo || null,
+          
+          // Mode-specific fields
+          chequeNumber: p.chequeNumber || null,
+          chequeDate: p.chequeDate || null,
+          bankName: p.bankName || null,
+          transferType: p.transferType || null,
+          transferDate: p.transferDate || null,
+          upiId: p.upiId || null,
+          upiName: p.upiName || null,
+          upiDate: p.upiDate || null,
+        };
+      });
+
+      // ✅ Format refunds
+      const refunds = refundsSnap.docs.map(doc => {
+        const r = doc.data();
+        const bill = billsMap[r.billId] || {};
+        
+        return {
+          id: doc.id,
+          type: "Refund",
+          billId: r.billId,
+          invoiceNo: bill.invoiceNo || r.billId,
+          patientName: bill.patientName || "",
+          amount: Number(r.amount || 0),
+          mode: r.mode || "Cash",
+          date: formatDateDot(r.refundDate || ""),
+          paymentDateTime: r.refundDateTime || 
+            (r.refundDate ? `${r.refundDate}T00:00:00.000Z` : null),
+          receiptNo: r.refundReceiptNo || doc.id,
+          referenceNo: r.referenceNo || null,
+          
+          // Mode-specific fields
+          chequeNumber: r.chequeNumber || null,
+          chequeDate: r.chequeDate || null,
+          bankName: r.bankName || null,
+          transferType: r.transferType || null,
+          transferDate: r.transferDate || null,
+          upiId: r.upiId || null,
+          upiName: r.upiName || null,
+          upiDate: r.upiDate || null,
+        };
+      });
+
+      // ✅ Combine and sort by date (DESC - latest first)
+      const allTransactions = [...payments, ...refunds];
+      allTransactions.sort((a, b) => {
+        const da = a.paymentDateTime ? new Date(a.paymentDateTime) : new Date(0);
+        const db = b.paymentDateTime ? new Date(b.paymentDateTime) : new Date(0);
+        return db - da; // DESC order
+      });
+
+      return allTransactions;
+    });
+
+    res.json(data);
+  } catch (err) {
+    console.error("GET /api/transactions error:", err);
+    res.status(500).json({ error: "Failed to fetch transactions" });
+  }
+});
+
+
+// server.js - Add this endpoint BEFORE app.listen()
+
+// ---------- GET /api/transactions/download-pdf (FILTERED TRANSACTIONS PDF) ----------
+app.get("/api/transactions/download-pdf", async (req, res) => {
+  const { type } = req.query; // all, payment, refund
+  
+  try {
+    // ✅ Fetch transactions based on filter
+    let paymentsSnap, refundsSnap;
+    
+    if (type === "payment" || type === "all") {
+      paymentsSnap = await db
+        .collection("payments")
+        .orderBy("paymentDateTime", "desc")
+        .get();
+    }
+    
+    if (type === "refund" || type === "all") {
+      refundsSnap = await db
+        .collection("refunds")
+        .orderBy("refundDateTime", "desc")
+        .get();
+    }
+
+    // ✅ Fetch bills for lookup
+    const billsSnap = await db.collection("bills").get();
+    const billsMap = {};
+    billsSnap.forEach(doc => {
+      const bill = doc.data();
+      billsMap[doc.id] = {
+        invoiceNo: bill.invoiceNo || doc.id,
+        patientName: bill.patientName || ""
+      };
+    });
+
+    // ✅ Build transactions array
+    const transactions = [];
+
+    if (paymentsSnap) {
+      paymentsSnap.forEach(doc => {
+        const p = doc.data();
+        const bill = billsMap[p.billId] || {};
+        transactions.push({
+          id: doc.id,
+          type: "Payment",
+          billId: p.billId,
+          invoiceNo: bill.invoiceNo || p.billId,
+          patientName: bill.patientName || "",
+          amount: Number(p.amount || 0),
+          mode: p.mode || "Cash",
+          date: p.paymentDate || "",
+          paymentDateTime: p.paymentDateTime || 
+            (p.paymentDate ? `${p.paymentDate}T00:00:00.000Z` : null),
+          receiptNo: p.receiptNo || doc.id,
+          referenceNo: p.referenceNo || null,
+          chequeNumber: p.chequeNumber || null,
+          bankName: p.bankName || null,
+          upiId: p.upiId || null,
+        });
+      });
+    }
+
+    if (refundsSnap) {
+      refundsSnap.forEach(doc => {
+        const r = doc.data();
+        const bill = billsMap[r.billId] || {};
+        transactions.push({
+          id: doc.id,
+          type: "Refund",
+          billId: r.billId,
+          invoiceNo: bill.invoiceNo || r.billId,
+          patientName: bill.patientName || "",
+          amount: Number(r.amount || 0),
+          mode: r.mode || "Cash",
+          date: r.refundDate || "",
+          paymentDateTime: r.refundDateTime || 
+            (r.refundDate ? `${r.refundDate}T00:00:00.000Z` : null),
+          receiptNo: r.refundReceiptNo || doc.id,
+          referenceNo: r.referenceNo || null,
+          chequeNumber: r.chequeNumber || null,
+          bankName: r.bankName || null,
+          upiId: r.upiId || null,
+        });
+      });
+    }
+
+    // ✅ Sort by date DESC
+    transactions.sort((a, b) => {
+      const da = a.paymentDateTime ? new Date(a.paymentDateTime) : new Date(0);
+      const db = b.paymentDateTime ? new Date(b.paymentDateTime) : new Date(0);
+      return db - da;
+    });
+
+    // ✅ Calculate totals
+    const totalPayments = transactions
+      .filter(t => t.type === "Payment")
+      .reduce((sum, t) => sum + t.amount, 0);
+    
+    const totalRefunds = transactions
+      .filter(t => t.type === "Refund")
+      .reduce((sum, t) => sum + t.amount, 0);
+    
+    const netAmount = totalPayments - totalRefunds;
+
+    // ✅ Fetch clinic profile
+    const profile = await getClinicProfile({ force: true });
+    const clinicName = profileValue(profile, "clinicName");
+    const clinicAddress = profileValue(profile, "address");
+    const clinicPAN = profileValue(profile, "pan");
+    const clinicRegNo = profileValue(profile, "regNo");
+
+    // ✅ PDF Setup
+    const titleText = 
+      type === "payment" ? "PAYMENTS REPORT" :
+      type === "refund" ? "REFUNDS REPORT" :
+      "TRANSACTIONS REPORT";
+
+    res.setHeader("Content-Type", "application/pdf");
+    res.setHeader(
+      "Content-Disposition",
+      `inline; filename="${type}-transactions-${new Date().toISOString().slice(0, 10)}.pdf"`
+    );
+
+    const doc = new PDFDocument({ size: "A4", margin: 36 });
+    doc.pipe(res);
+
+    const pageWidth = doc.page.width;
+    const usableWidth = pageWidth - 72;
+    let y = 40;
+
+    // ✅ Header
+    doc
+      .font("Helvetica-Bold")
+      .fontSize(16)
+      .text(clinicName || "", 0, y, { align: "center", width: pageWidth });
+    
+    doc
+      .font("Helvetica")
+      .fontSize(9)
+      .text(clinicAddress || "", 0, y + 20, { align: "center", width: pageWidth })
+      .text(
+        (clinicPAN ? `PAN: ${clinicPAN}` : "") +
+        (clinicPAN && clinicRegNo ? "   |   " : "") +
+        (clinicRegNo ? `Reg. No.: ${clinicRegNo}` : ""),
+        { align: "center", width: pageWidth }
+      );
+
+    y += 50;
+    doc.moveTo(36, y).lineTo(pageWidth - 36, y).stroke();
+    y += 10;
+
+    // ✅ Title
+    doc
+      .fontSize(12)
+      .font("Helvetica-Bold")
+      .text(titleText, 36, y, { align: "center", width: usableWidth });
+    
+    y += 20;
+    doc
+      .fontSize(9)
+      .font("Helvetica")
+      .text(`Generated on: ${formatDateDot(new Date().toISOString())}`, 36, y);
+    
+    y += 20;
+
+    // ✅ Summary Box
+    const boxWidth = usableWidth;
+    const boxHeight = 60;
+    doc.rect(36, y, boxWidth, boxHeight).stroke();
+
+    doc.font("Helvetica-Bold").fontSize(10).text("Summary", 42, y + 6);
+    y += 24;
+
+    doc.font("Helvetica").fontSize(9);
+    const col1X = 42;
+    const col2X = 220;
+    const col3X = 400;
+
+    doc.text("Total Payments:", col1X, y);
+    doc.text(`Rs ${totalPayments.toFixed(2)}`, col1X, y + 12);
+
+    doc.text("Total Refunds:", col2X, y);
+    doc.text(`Rs ${totalRefunds.toFixed(2)}`, col2X, y + 12);
+
+    doc.text("Net Amount:", col3X, y);
+    doc.text(`Rs ${netAmount.toFixed(2)}`, col3X, y + 12);
+
+    y += 40;
+
+    // ✅ Transactions Table
+    const tableLeft = 36;
+    const colDateW = 60;
+    const colTypeW = 50;
+    const colBillW = 70;
+    const colPatientW = 120;
+    const colModeW = 60;
+    const colAmtW = usableWidth - (colDateW + colTypeW + colBillW + colPatientW + colModeW);
+
+    const colDateX = tableLeft;
+    const colTypeX = colDateX + colDateW;
+    const colBillX = colTypeX + colTypeW;
+    const colPatientX = colBillX + colBillW;
+    const colModeX = colPatientX + colPatientW;
+    const colAmtX = colModeX + colModeW;
+    const tableRightX = tableLeft + usableWidth;
+
+    const headerHeight = 16;
+    const minRowHeight = 14;
+
+    // Header
+    doc
+      .save()
+      .rect(tableLeft, y, usableWidth, headerHeight)
+      .fill("#F3F3F3")
+      .restore()
+      .rect(tableLeft, y, usableWidth, headerHeight)
+      .stroke();
+
+    doc.font("Helvetica-Bold").fontSize(8);
+    doc.text("Date", colDateX + 4, y + 4, { width: colDateW - 8 });
+    doc.text("Type", colTypeX + 4, y + 4, { width: colTypeW - 8 });
+    doc.text("Bill #", colBillX + 4, y + 4, { width: colBillW - 8 });
+    doc.text("Patient", colPatientX + 4, y + 4, { width: colPatientW - 8 });
+    doc.text("Mode", colModeX + 4, y + 4, { width: colModeW - 8 });
+    doc.text("Amount", colAmtX + 4, y + 4, { width: colAmtW - 8, align: "right" });
+
+    y += headerHeight;
+    doc.moveTo(tableLeft, y).lineTo(tableRightX, y).stroke();
+
+    // Rows
+    doc.font("Helvetica").fontSize(8);
+    for (const txn of transactions) {
+      if (y + minRowHeight > doc.page.height - 80) {
+        doc.addPage();
+        y = 40;
+        
+        // Redraw header on new page
+        doc
+          .save()
+          .rect(tableLeft, y, usableWidth, headerHeight)
+          .fill("#F3F3F3")
+          .restore()
+          .rect(tableLeft, y, usableWidth, headerHeight)
+          .stroke();
+
+        doc.font("Helvetica-Bold").fontSize(8);
+        doc.text("Date", colDateX + 4, y + 4, { width: colDateW - 8 });
+        doc.text("Type", colTypeX + 4, y + 4, { width: colTypeW - 8 });
+        doc.text("Bill #", colBillX + 4, y + 4, { width: colBillW - 8 });
+        doc.text("Patient", colPatientX + 4, y + 4, { width: colPatientW - 8 });
+        doc.text("Mode", colModeX + 4, y + 4, { width: colModeW - 8 });
+        doc.text("Amount", colAmtX + 4, y + 4, { width: colAmtW - 8, align: "right" });
+
+        y += headerHeight;
+        doc.moveTo(tableLeft, y).lineTo(tableRightX, y).stroke();
+        doc.font("Helvetica").fontSize(8);
+      }
+
+      const rowTop = y;
+      doc.text(formatDateDot(txn.date), colDateX + 4, rowTop + 3, { width: colDateW - 8 });
+      doc.text(txn.type, colTypeX + 4, rowTop + 3, { width: colTypeW - 8 });
+      doc.text(`#${txn.invoiceNo}`, colBillX + 4, rowTop + 3, { width: colBillW - 8 });
+      doc.text(txn.patientName, colPatientX + 4, rowTop + 3, { width: colPatientW - 8 });
+      doc.text(txn.mode, colModeX + 4, rowTop + 3, { width: colModeW - 8 });
+      
+      const amtText = `${txn.type === "Payment" ? "+" : "-"} Rs ${txn.amount.toFixed(2)}`;
+      doc.text(amtText, colAmtX + 4, rowTop + 3, { width: colAmtW - 8, align: "right" });
+
+      y += minRowHeight;
+    }
+
+    // Final border
+    doc.moveTo(tableLeft, y).lineTo(tableRightX, y).stroke();
+
+    // Vertical lines
+    [colDateX, colTypeX, colBillX, colPatientX, colModeX, colAmtX, tableRightX].forEach(x => {
+      doc.moveTo(x, y - (transactions.length * minRowHeight) - headerHeight)
+         .lineTo(x, y)
+         .stroke();
+    });
+
+    doc.end();
+  } catch (err) {
+    console.error("transactions PDF error:", err);
+    if (!res.headersSent) {
+      res.status(500).json({ error: "Failed to generate PDF" });
+    }
   }
 });
 
