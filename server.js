@@ -422,7 +422,7 @@ app.get("/api/bills", async (_req, res) => {
 
         const paidGross = paysSnap.docs.reduce(
           (sum, d) => sum + Number(d.data().amount || 0),
-          0
+          0,
         );
 
         // ---------------- REFUNDS ----------------
@@ -433,7 +433,7 @@ app.get("/api/bills", async (_req, res) => {
 
         const refunded = refundsSnap.docs.reduce(
           (sum, d) => sum + Number(d.data().amount || 0),
-          0
+          0,
         );
 
         // ---------------- NET CALCULATION ----------------
@@ -441,9 +441,7 @@ app.get("/api/bills", async (_req, res) => {
 
         // 🔥 BUSINESS OVERRIDE
         // Procedure done = balance must be ZERO no matter what
-        const balance = isProcedureCompleted
-          ? 0
-          : Math.max(total - paidNet, 0);
+        const balance = isProcedureCompleted ? 0 : Math.max(total - paidNet, 0);
 
         result.push({
           id: billId,
@@ -452,7 +450,7 @@ app.get("/api/bills", async (_req, res) => {
           date: formatDateDot(b.date || null),
 
           total,
-          paid: paidNet,        // NET PAID (2000 / 500 etc)
+          paid: paidNet, // NET PAID (2000 / 500 etc)
           refunded,
           balance,
 
@@ -470,7 +468,6 @@ app.get("/api/bills", async (_req, res) => {
     res.status(500).json({ error: "Failed to fetch bills" });
   }
 });
-
 
 app.post("/api/bills", async (req, res) => {
   try {
@@ -543,7 +540,7 @@ app.post("/api/bills", async (req, res) => {
     // 3) TOTALS (no Subtotal / Adjust)
     const total = itemsData.reduce(
       (sum, it) => sum + Number(it.amount || 0),
-      0
+      0,
     );
 
     const firstPay = Number(pay) || 0;
@@ -675,7 +672,7 @@ app.post("/api/bills", async (req, res) => {
         qty: it.qty,
         rate: it.rate,
         amount: it.amount,
-      }))
+      })),
     );
 
     // 9) Response (doctorReg removed)
@@ -717,7 +714,6 @@ app.post("/api/bills", async (req, res) => {
     res.status(500).json({ error: "Failed to create bill" });
   }
 });
-
 
 app.get("/api/bills/:id", async (req, res) => {
   const id = req.params.id;
@@ -783,14 +779,18 @@ app.get("/api/bills/:id", async (req, res) => {
       });
 
       payments.sort((a, b) => {
-        const da = a.paymentDateTime ? new Date(a.paymentDateTime) : new Date(0);
-        const dbb = b.paymentDateTime ? new Date(b.paymentDateTime) : new Date(0);
+        const da = a.paymentDateTime
+          ? new Date(a.paymentDateTime)
+          : new Date(0);
+        const dbb = b.paymentDateTime
+          ? new Date(b.paymentDateTime)
+          : new Date(0);
         return da - dbb;
       });
 
       const totalPaidGross = payments.reduce(
         (sum, p) => sum + Number(p.amount || 0),
-        0
+        0,
       );
 
       // ---------------- REFUNDS ----------------
@@ -838,7 +838,7 @@ app.get("/api/bills/:id", async (req, res) => {
 
       const totalRefunded = refunds.reduce(
         (sum, r) => sum + Number(r.amount || 0),
-        0
+        0,
       );
 
       // ---------------- FINAL CALCULATION ----------------
@@ -862,8 +862,8 @@ app.get("/api/bills/:id", async (req, res) => {
         procedureConfirmed: bill.procedureConfirmed || false, // ✅ ADD THIS LINE
 
         total,
-        paid: netPaid,                 // ✅ NET PAID
-        totalPaid: totalPaidGross,     // ✅ GROSS PAID
+        paid: netPaid, // ✅ NET PAID
+        totalPaid: totalPaidGross, // ✅ GROSS PAID
         refunded: totalRefunded,
         balance,
         status,
@@ -892,7 +892,6 @@ app.get("/api/bills/:id", async (req, res) => {
   }
 });
 
-
 // app.patch("/api/bills/:id", async (req, res) => {
 //   const id = req.params.id;
 //   const { procedureConfirmed } = req.body;
@@ -915,17 +914,16 @@ app.get("/api/bills/:id", async (req, res) => {
 //       updatedAt: new Date().toISOString()
 //     });
 
-//     res.json({ 
-//       success: true, 
+//     res.json({
+//       success: true,
 //       message: "Bill updated successfully",
-//       procedureConfirmed 
+//       procedureConfirmed
 //     });
 //   } catch (err) {
 //     console.error("Error updating bill:", err);
 //     res.status(500).json({ error: "Failed to update bill" });
 //   }
 // });
-
 
 // ---------- POST /api/bills/:id/payments (add partial payment) ----------
 
@@ -966,7 +964,6 @@ app.get("/api/bills/:id", async (req, res) => {
 //   }
 // });
 
-
 app.patch("/api/bills/:id", async (req, res) => {
   const id = req.params.id;
   const { procedureConfirmed } = req.body;
@@ -1000,8 +997,6 @@ app.patch("/api/bills/:id", async (req, res) => {
     res.status(500).json({ error: err.message });
   }
 });
-
-
 
 app.post("/api/bills/:id/payments", async (req, res) => {
   const billId = req.params.id;
@@ -1106,7 +1101,7 @@ app.post("/api/bills/:id/payments", async (req, res) => {
 
     syncPaymentToSheet(
       { id: paymentRef.id, ...paymentDoc },
-      { id: billId, invoiceNo: bill.invoiceNo, patientName: bill.patientName }
+      { id: billId, invoiceNo: bill.invoiceNo, patientName: bill.patientName },
     );
 
     res.status(201).json({
@@ -1160,7 +1155,7 @@ app.post("/api/bills/:id/refunds", async (req, res) => {
 
     const bill = billSnap.data();
     const total = Number(bill.total || 0);
-    
+
     // ✅ FIX: bill.paid is ALREADY net paid amount
     // It gets updated after each refund: paid = paidGross - totalRefunded
     const currentNetPaid = Number(bill.paid || 0);
@@ -1172,8 +1167,8 @@ app.post("/api/bills/:id/refunds", async (req, res) => {
         details: {
           currentNetPaid: currentNetPaid,
           requestedRefund: numericAmount,
-          maxRefundable: currentNetPaid
-        }
+          maxRefundable: currentNetPaid,
+        },
       });
     }
 
@@ -1215,7 +1210,7 @@ app.post("/api/bills/:id/refunds", async (req, res) => {
     const newNetPaid = currentNetPaid - numericAmount;
     const newBalance = total - newNetPaid;
     const newStatus = computeStatus(total, newNetPaid);
-    
+
     // ✅ Update bill.refunded (cumulative refunds)
     const oldRefunded = Number(bill.refunded || 0);
     const newRefunded = oldRefunded + numericAmount;
@@ -1240,7 +1235,7 @@ app.post("/api/bills/:id/refunds", async (req, res) => {
         netPaidAfterThis: newNetPaid,
         balanceAfterThis: newBalance,
       },
-      { id: billId, invoiceNo: bill.invoiceNo, patientName: bill.patientName }
+      { id: billId, invoiceNo: bill.invoiceNo, patientName: bill.patientName },
     );
 
     res.status(201).json({
@@ -1298,7 +1293,6 @@ app.get("/api/payments/:id", async (req, res) => {
     res.status(500).json({ error: "Failed to load payment" });
   }
 });
-
 
 app.put("/api/payments/:id", async (req, res) => {
   const paymentId = req.params.id;
@@ -1585,7 +1579,7 @@ app.put("/api/bills/:id", async (req, res) => {
 
     const total = itemsData.reduce(
       (sum, it) => sum + Number(it.amount || 0),
-      0
+      0,
     );
 
     // keep payments/refunds as is
@@ -1604,12 +1598,12 @@ app.put("/api/bills/:id", async (req, res) => {
       patientName: finalPatientName,
       sex: sex ?? oldBill.sex ?? null,
       address: address ?? oldBill.address ?? "",
-      age: typeof age !== "undefined" ? Number(age) : oldBill.age ?? null,
+      age: typeof age !== "undefined" ? Number(age) : (oldBill.age ?? null),
       date: jsDate,
       procedureDone:
         typeof procedureDone !== "undefined"
           ? procedureDone
-          : oldBill.procedureDone ?? null,
+          : (oldBill.procedureDone ?? null),
 
       total,
       paid: paidGross,
@@ -1617,7 +1611,7 @@ app.put("/api/bills/:id", async (req, res) => {
       balance,
       status,
       remarks:
-        typeof remarks !== "undefined" ? remarks : oldBill.remarks ?? null,
+        typeof remarks !== "undefined" ? remarks : (oldBill.remarks ?? null),
       services: normalizedServices,
     });
 
@@ -1662,7 +1656,7 @@ app.put("/api/bills/:id", async (req, res) => {
       invoiceNo: oldBill.invoiceNo || billId,
       patientName: finalPatientName,
       address: address ?? oldBill.address ?? "",
-      age: typeof age !== "undefined" ? Number(age) : oldBill.age ?? null,
+      age: typeof age !== "undefined" ? Number(age) : (oldBill.age ?? null),
       date: jsDate,
       total,
       paid: paidGross,
@@ -1681,7 +1675,7 @@ app.put("/api/bills/:id", async (req, res) => {
         qty: it.qty,
         rate: it.rate,
         amount: it.amount,
-      }))
+      })),
     );
 
     res.json({
@@ -1690,7 +1684,7 @@ app.put("/api/bills/:id", async (req, res) => {
       patientName: finalPatientName,
       sex: sex ?? oldBill.sex ?? null,
       address: address ?? oldBill.address ?? "",
-      age: typeof age !== "undefined" ? Number(age) : oldBill.age ?? null,
+      age: typeof age !== "undefined" ? Number(age) : (oldBill.age ?? null),
       date: jsDate,
       total,
       paid: paidGross,
@@ -1698,7 +1692,7 @@ app.put("/api/bills/:id", async (req, res) => {
       balance,
       status,
       remarks:
-        typeof remarks !== "undefined" ? remarks : oldBill.remarks ?? null,
+        typeof remarks !== "undefined" ? remarks : (oldBill.remarks ?? null),
       services: normalizedServices,
     });
   } catch (err) {
@@ -1706,7 +1700,6 @@ app.put("/api/bills/:id", async (req, res) => {
     res.status(500).json({ error: "Failed to update bill" });
   }
 });
-
 
 // ---------- GET /api/refunds/:id (FOR EDIT REFUND) ----------
 app.get("/api/refunds/:id", async (req, res) => {
@@ -1752,7 +1745,6 @@ app.get("/api/refunds/:id", async (req, res) => {
     res.status(500).json({ error: "Failed to load refund" });
   }
 });
-
 
 // ---------- PDF: Payment Receipt (A4 half page, professional layout) ----------
 app.get("/api/payments/:id/receipt-html-pdf", async (req, res) => {
@@ -1849,14 +1841,14 @@ app.get("/api/payments/:id/receipt-html-pdf", async (req, res) => {
     const doctor2RegNo = profileValue(profile, "doctor2RegNo");
     const patientRepresentative = profileValue(
       profile,
-      "patientRepresentative"
+      "patientRepresentative",
     );
     const clinicRepresentative = profileValue(profile, "clinicRepresentative");
 
     res.setHeader("Content-Type", "application/pdf");
     res.setHeader(
       "Content-Disposition",
-      `inline; filename="receipt-${id}.pdf"`
+      `inline; filename="receipt-${id}.pdf"`,
     );
 
     const doc = new PDFDocument({
@@ -1906,7 +1898,7 @@ app.get("/api/payments/:id/receipt-html-pdf", async (req, res) => {
         {
           align: "center",
           width: pageWidth,
-        }
+        },
       );
 
     y += 48;
@@ -1935,7 +1927,7 @@ app.get("/api/payments/:id/receipt-html-pdf", async (req, res) => {
       {
         align: "right",
         width: usableWidth / 2,
-      }
+      },
     );
 
     y += 16;
@@ -2094,669 +2086,6 @@ app.get("/api/payments/:id/receipt-html-pdf", async (req, res) => {
   }
 });
 
-
-// app.get("/api/refunds/:id/refund-html-pdf", async (req, res) => {
-//   const id = req.params.id;
-//   if (!id) return res.status(400).json({ error: "Invalid refund id" });
-
-//   try {
-//     // ---------- REFUND ----------
-//     const refundRef = db.collection("refunds").doc(id);
-//     const refundSnap = await refundRef.get();
-//     if (!refundSnap.exists) {
-//       return res.status(404).json({ error: "Refund not found" });
-//     }
-//     const refund = refundSnap.data();
-//     const billId = refund.billId;
-
-//     // ---------- BILL ----------
-//     const billRef = db.collection("bills").doc(billId);
-//     const billSnap = await billRef.get();
-//     if (!billSnap.exists) {
-//       return res.status(404).json({ error: "Bill not found" });
-//     }
-//     const bill = billSnap.data();
-//     const billTotal = Number(bill.total || 0);
-
-//     // ---------- PAYMENTS (GROSS) ----------
-//     const paysSnap = await db
-//       .collection("payments")
-//       .where("billId", "==", billId)
-//       .get();
-
-//     const payments = paysSnap.docs.map((doc) => {
-//       const d = doc.data();
-//       return {
-//         amount: Number(d.amount || 0),
-//         date: new Date(
-//           d.paymentDateTime ||
-//             (d.paymentDate ? `${d.paymentDate}T00:00:00.000Z` : 0)
-//         ),
-//       };
-//     });
-
-//     const totalPaidGross = payments.reduce((s, p) => s + p.amount, 0);
-
-//     // ---------- REFUNDS (ORDERED) ----------
-//     const refundsSnap = await db
-//       .collection("refunds")
-//       .where("billId", "==", billId)
-//       .get();
-
-//     const refunds = refundsSnap.docs
-//       .map((doc) => {
-//         const d = doc.data();
-//         return {
-//           id: doc.id,
-//           amount: Number(d.amount || 0),
-//           date: new Date(
-//             d.refundDateTime ||
-//               (d.refundDate ? `${d.refundDate}T00:00:00.000Z` : 0)
-//           ),
-//         };
-//       })
-//       .sort((a, b) => a.date - b.date);
-
-//     // ---------- REFUND TILL THIS RECEIPT ----------
-//     let refundedTillThis = 0;
-//     for (const r of refunds) {
-//       refundedTillThis += r.amount;
-//       if (r.id === id) break;
-//     }
-
-//     // ---------- FINAL NUMBERS (FIXED) ----------
-//     // Net amount that customer has actually paid (after deducting refunds)
-//     const netPaidTillThis = totalPaidGross - refundedTillThis;
-    
-//     // Balance = Bill Total - Net Paid
-//     // If Net Paid < Bill Total, customer owes money (positive balance)
-//     // If Net Paid >= Bill Total, balance should be 0
-//     const balanceAfterThis = Math.max(0, billTotal - netPaidTillThis);
-
-//     // ---------- HELPERS ----------
-//     function formatMoney(v) {
-//       return Number(v || 0).toFixed(2);
-//     }
-
-//     // Assuming you already have these utility functions somewhere
-//     // formatDateDot, getClinicProfile, profileValue, etc.
-
-//     const patientName = bill.patientName || "";
-//     const address = bill.address || "";
-//     const drawnOn = refund.drawnOn || null;
-//     const drawnAs = refund.drawnAs || null;
-//     const mode = refund.mode || "Cash";
-//     const referenceNo = refund.referenceNo || null;
-//     const refundNo =
-//       refund.refundReceiptNo || `F-${String(id).padStart(4, "0")}`;
-
-//     const chequeDate = refund.chequeDate || null;
-//     const chequeNumber = refund.chequeNumber || null;
-//     const bankName = refund.bankName || null;
-//     const transferType = refund.transferType || null;
-//     const transferDate = refund.transferDate || null;
-//     const upiName = refund.upiName || null;
-//     const upiId = refund.upiId || null;
-//     const upiDate = refund.upiDate || null;
-
-//     // ---------- CLINIC PROFILE ----------
-//     const profile = await getClinicProfile({ force: true });
-//     const clinicName = profileValue(profile, "clinicName");
-//     const clinicAddress = profileValue(profile, "address");
-//     const clinicPAN = profileValue(profile, "pan");
-//     const clinicRegNo = profileValue(profile, "regNo");
-//     const doctor1Name = profileValue(profile, "doctor1Name");
-//     const doctor1RegNo = profileValue(profile, "doctor1RegNo");
-//     const doctor2Name = profileValue(profile, "doctor2Name");
-//     const doctor2RegNo = profileValue(profile, "doctor2RegNo");
-//     const clinicRepresentative = profileValue(profile, "clinicRepresentative");
-
-//     // ---------- PDF HEADERS ----------
-//     res.setHeader("Content-Type", "application/pdf");
-//     res.setHeader(
-//       "Content-Disposition",
-//       `inline; filename="refund-${id}.pdf"`
-//     );
-
-//     const doc = new PDFDocument({
-//       size: "A4",
-//       margin: 36,
-//     });
-
-//     doc.pipe(res);
-
-//     const pageWidth = doc.page.width;
-//     const usableWidth = pageWidth - 72;
-//     let y = 40;
-
-//     const logoLeftPath = path.join(__dirname, "resources", "logo-left.png");
-//     const logoRightPath = path.join(__dirname, "resources", "logo-right.png");
-
-//     const leftLogoX = 36;
-//     const rightLogoX = pageWidth - 36;
-
-//     // HEADER
-//     try {
-//       doc.image(logoLeftPath, leftLogoX, y, { width: 32, height: 32 });
-//     } catch (e) {}
-//     try {
-//       doc.image(logoRightPath, rightLogoX - 32, y, { width: 32, height: 32 });
-//     } catch (e) {}
-
-//     doc
-//       .font("Helvetica-Bold")
-//       .fontSize(13)
-//       .text(clinicName || "", 0, y + 2, {
-//         align: "center",
-//         width: pageWidth,
-//       });
-
-//     doc
-//       .font("Helvetica")
-//       .fontSize(9)
-//       .text(clinicAddress || "", 0, y + 20, {
-//         align: "center",
-//         width: pageWidth,
-//       })
-//       .text(
-//         (clinicPAN ? `PAN: ${clinicPAN}` : "") +
-//           (clinicPAN && clinicRegNo ? "   |   " : "") +
-//           (clinicRegNo ? `Reg. No.: ${clinicRegNo}` : ""),
-//         {
-//           align: "center",
-//           width: pageWidth,
-//         }
-//       );
-
-//     y += 48;
-
-//     doc.moveTo(36, y).lineTo(pageWidth - 36, y).stroke();
-//     y += 6;
-
-//     // DOCTOR LINE
-//     doc.font("Helvetica-Bold").fontSize(9);
-//     doc.text(doctor1Name || "", 36, y);
-//     doc.text(doctor2Name || "", pageWidth / 2, y, {
-//       align: "right",
-//       width: usableWidth / 2,
-//     });
-
-//     y += 12;
-//     doc.font("Helvetica").fontSize(8);
-//     doc.text(doctor1RegNo ? `Reg. No.: ${doctor1RegNo}` : "", 36, y);
-//     doc.text(
-//       doctor2RegNo ? `Reg. No.: ${doctor2RegNo}` : "",
-//       pageWidth / 2,
-//       y,
-//       {
-//         align: "right",
-//         width: usableWidth / 2,
-//       }
-//     );
-
-//     y += 16;
-
-//     // TITLE BAR
-//     doc
-//       .save()
-//       .rect(36, y, usableWidth, 18)
-//       .fill("#F3F3F3")
-//       .restore()
-//       .rect(36, y, usableWidth, 18)
-//       .stroke();
-
-//     doc.font("Helvetica-Bold").fontSize(10).text("REFUND RECEIPT", 36, y + 4, {
-//       align: "center",
-//       width: usableWidth,
-//     });
-
-//     y += 26;
-
-//     // COMMON LAYOUT
-//     const leftX = 36;
-//     const rightBoxWidth = 180;
-//     const rightX = pageWidth - 36 - rightBoxWidth;
-
-//     doc.font("Helvetica").fontSize(9);
-//     doc.text(`Refund No.: ${refundNo}`, leftX, y);
-//     doc.text(`Date: ${formatDateDot(refund.refundDate || "")}`, rightX, y, {
-//       width: rightBoxWidth,
-//       align: "right",
-//     });
-
-//     y += 16;
-
-//     const detailsTopY = y;
-//     const leftWidth = rightX - leftX - 10;
-
-//     doc
-//       .font("Helvetica-Bold")
-//       .text(`Patient Name: ${patientName}`, leftX, detailsTopY, {
-//         width: leftWidth,
-//       });
-//     doc.font("Helvetica").text(`Address: ${address}`, leftX, doc.y + 3, {
-//       width: leftWidth,
-//     });
-
-//     let detailsY = doc.y + 4;
-//     doc.font("Helvetica");
-
-//     const addDetailR = (label, value) => {
-//       if (!value) return;
-//       doc.text(`${label} ${value}`, leftX, detailsY, { width: leftWidth });
-//       detailsY = doc.y + 3;
-//     };
-
-//     addDetailR("Amount Refunded: Rs", formatMoney(refund.amount));
-//     addDetailR("Refund Mode:", mode);
-//     addDetailR("Reference No.:", referenceNo);
-//     addDetailR("Drawn On:", drawnOn);
-//     addDetailR("Drawn As:", drawnAs);
-//     addDetailR("Cheque No.:", chequeNumber);
-//     addDetailR("Cheque Date:", formatDateDot(chequeDate));
-//     addDetailR("Bank:", bankName);
-//     addDetailR("Transfer Type:", transferType);
-//     addDetailR("Transfer Date:", formatDateDot(transferDate));
-//     addDetailR("UPI ID:", upiId);
-//     addDetailR("UPI Name:", upiName);
-//     addDetailR("UPI Date:", formatDateDot(upiDate));
-
-//     // RIGHT BILL SUMMARY
-//     const boxY = detailsTopY;
-//     const lineH = 12;
-//     const boxHeight = 100;
-
-//     doc.rect(rightX, boxY, rightBoxWidth, boxHeight).stroke();
-
-//     let by2 = boxY + 4;
-//     doc.font("Helvetica-Bold").fontSize(9).text("Bill Summary", rightX + 6, by2);
-//     by2 += lineH + 2;
-//     doc.font("Helvetica").fontSize(9);
-
-//     const billNoText2 = bill.invoiceNo || billId;
-
-//     const addRow2 = (label, value) => {
-//       doc.text(label, rightX + 6, by2);
-//       doc.text(value, rightX + 6, by2, {
-//         width: rightBoxWidth - 12,
-//         align: "right",
-//       });
-//       by2 += lineH;
-//     };
-
-//     addRow2("Bill No.:", billNoText2);
-//     addRow2("Bill Date:", formatDateDot(bill.date || ""));
-//     addRow2("Bill Total:", `Rs ${formatMoney(billTotal)}`);
-//     addRow2("Total Paid:", `Rs ${formatMoney(netPaidTillThis)}`);
-//     //addRow2("Refunded (incl. this):", `Rs ${formatMoney(refundedTillThis)}`);
-//     addRow2("Refunded (incl. this):", `Rs ${formatMoney(refund.amount)}`);
-//     addRow2("Balance:", `Rs ${formatMoney(balanceAfterThis)}`);
-
-//     // FOOTNOTE + SIGNATURES
-//     y = Math.max(detailsY + 6, boxY + boxHeight + 6);
-
-//     doc
-//       .font("Helvetica")
-//       .fontSize(8)
-//       .text("* Dispute if any subject to Jamshedpur Jurisdiction", leftX, y, {
-//         width: usableWidth,
-//       });
-
-//     const sigY = y + 24;
-//     const sigWidth = 160;
-
-//     const rightSigX = pageWidth - 36 - sigWidth;
-//     doc
-//       .moveTo(rightSigX, sigY)
-//       .lineTo(rightSigX + sigWidth, sigY)
-//       .dash(1, { space: 2 })
-//       .stroke()
-//       .undash();
-//     doc.fontSize(8).text(clinicRepresentative || "", rightSigX, sigY + 4, {
-//       width: sigWidth,
-//       align: "center",
-//     });
-
-//     doc.end();
-//   } catch (err) {
-//     console.error("refund-html-pdf error:", err);
-//     if (!res.headersSent) {
-//       res.status(500).json({ error: "Failed to generate refund PDF" });
-//     }
-//   }
-// });
-
-
-// app.get("/api/refunds/:id/refund-html-pdf", async (req, res) => {
-//   const id = req.params.id;
-//   if (!id) return res.status(400).json({ error: "Invalid refund id" });
-
-//   try {
-//     // ---------- REFUND ----------
-//     const refundRef = db.collection("refunds").doc(id);
-//     const refundSnap = await refundRef.get();
-//     if (!refundSnap.exists) {
-//       return res.status(404).json({ error: "Refund not found" });
-//     }
-//     const refund = refundSnap.data();
-//     const billId = refund.billId;
-
-//     // ---------- BILL ----------
-//     const billRef = db.collection("bills").doc(billId);
-//     const billSnap = await billRef.get();
-//     if (!billSnap.exists) {
-//       return res.status(404).json({ error: "Bill not found" });
-//     }
-//     const bill = billSnap.data();
-//     const billTotal = Number(bill.total || 0);
-//     const isProcedureCompleted = bill.procedureConfirmed === true; // ✅ ADD THIS
-
-//     // ---------- PAYMENTS (GROSS) ----------
-//     const paysSnap = await db
-//       .collection("payments")
-//       .where("billId", "==", billId)
-//       .get();
-
-//     const payments = paysSnap.docs.map((doc) => {
-//       const d = doc.data();
-//       return {
-//         amount: Number(d.amount || 0),
-//         date: new Date(
-//           d.paymentDateTime ||
-//             (d.paymentDate ? `${d.paymentDate}T00:00:00.000Z` : 0)
-//         ),
-//       };
-//     });
-
-//     const totalPaidGross = payments.reduce((s, p) => s + p.amount, 0);
-
-//     // ---------- REFUNDS (ORDERED) ----------
-//     const refundsSnap = await db
-//       .collection("refunds")
-//       .where("billId", "==", billId)
-//       .get();
-
-//     const refunds = refundsSnap.docs
-//       .map((doc) => {
-//         const d = doc.data();
-//         return {
-//           id: doc.id,
-//           amount: Number(d.amount || 0),
-//           date: new Date(
-//             d.refundDateTime ||
-//               (d.refundDate ? `${d.refundDate}T00:00:00.000Z` : 0)
-//           ),
-//         };
-//       })
-//       .sort((a, b) => a.date - b.date);
-
-//     // ---------- REFUND TILL THIS RECEIPT ----------
-//     let refundedTillThis = 0;
-//     for (const r of refunds) {
-//       refundedTillThis += r.amount;
-//       if (r.id === id) break;
-//     }
-
-//     // ---------- FINAL NUMBERS (FIXED WITH PROCEDURE CHECK) ----------
-//     const netPaidTillThis = totalPaidGross - refundedTillThis;
-    
-//     // 🔥 BUSINESS OVERRIDE: Procedure done = balance ZERO
-//     const balanceAfterThis = isProcedureCompleted 
-//       ? 0 
-//       : Math.max(0, billTotal - netPaidTillThis);
-
-//     // ---------- HELPERS ----------
-//     function formatMoney(v) {
-//       return Number(v || 0).toFixed(2);
-//     }
-
-//     // Assuming you already have these utility functions somewhere
-//     // formatDateDot, getClinicProfile, profileValue, etc.
-
-//     const patientName = bill.patientName || "";
-//     const address = bill.address || "";
-//     const drawnOn = refund.drawnOn || null;
-//     const drawnAs = refund.drawnAs || null;
-//     const mode = refund.mode || "Cash";
-//     const referenceNo = refund.referenceNo || null;
-//     const refundNo =
-//       refund.refundReceiptNo || `F-${String(id).padStart(4, "0")}`;
-
-//     const chequeDate = refund.chequeDate || null;
-//     const chequeNumber = refund.chequeNumber || null;
-//     const bankName = refund.bankName || null;
-//     const transferType = refund.transferType || null;
-//     const transferDate = refund.transferDate || null;
-//     const upiName = refund.upiName || null;
-//     const upiId = refund.upiId || null;
-//     const upiDate = refund.upiDate || null;
-
-//     // ---------- CLINIC PROFILE ----------
-//     const profile = await getClinicProfile({ force: true });
-//     const clinicName = profileValue(profile, "clinicName");
-//     const clinicAddress = profileValue(profile, "address");
-//     const clinicPAN = profileValue(profile, "pan");
-//     const clinicRegNo = profileValue(profile, "regNo");
-//     const doctor1Name = profileValue(profile, "doctor1Name");
-//     const doctor1RegNo = profileValue(profile, "doctor1RegNo");
-//     const doctor2Name = profileValue(profile, "doctor2Name");
-//     const doctor2RegNo = profileValue(profile, "doctor2RegNo");
-//     const clinicRepresentative = profileValue(profile, "clinicRepresentative");
-
-//     // ---------- PDF HEADERS ----------
-//     res.setHeader("Content-Type", "application/pdf");
-//     res.setHeader(
-//       "Content-Disposition",
-//       `inline; filename="refund-${id}.pdf"`
-//     );
-
-//     const doc = new PDFDocument({
-//       size: "A4",
-//       margin: 36,
-//     });
-
-//     doc.pipe(res);
-
-//     const pageWidth = doc.page.width;
-//     const usableWidth = pageWidth - 72;
-//     let y = 40;
-
-//     const logoLeftPath = path.join(__dirname, "resources", "logo-left.png");
-//     const logoRightPath = path.join(__dirname, "resources", "logo-right.png");
-
-//     const leftLogoX = 36;
-//     const rightLogoX = pageWidth - 36;
-
-//     // HEADER
-//     try {
-//       doc.image(logoLeftPath, leftLogoX, y, { width: 32, height: 32 });
-//     } catch (e) {}
-//     try {
-//       doc.image(logoRightPath, rightLogoX - 32, y, { width: 32, height: 32 });
-//     } catch (e) {}
-
-//     doc
-//       .font("Helvetica-Bold")
-//       .fontSize(13)
-//       .text(clinicName || "", 0, y + 2, {
-//         align: "center",
-//         width: pageWidth,
-//       });
-
-//     doc
-//       .font("Helvetica")
-//       .fontSize(9)
-//       .text(clinicAddress || "", 0, y + 20, {
-//         align: "center",
-//         width: pageWidth,
-//       })
-//       .text(
-//         (clinicPAN ? `PAN: ${clinicPAN}` : "") +
-//           (clinicPAN && clinicRegNo ? "   |   " : "") +
-//           (clinicRegNo ? `Reg. No.: ${clinicRegNo}` : ""),
-//         {
-//           align: "center",
-//           width: pageWidth,
-//         }
-//       );
-
-//     y += 48;
-
-//     doc.moveTo(36, y).lineTo(pageWidth - 36, y).stroke();
-//     y += 6;
-
-//     // DOCTOR LINE
-//     doc.font("Helvetica-Bold").fontSize(9);
-//     doc.text(doctor1Name || "", 36, y);
-//     doc.text(doctor2Name || "", pageWidth / 2, y, {
-//       align: "right",
-//       width: usableWidth / 2,
-//     });
-
-//     y += 12;
-//     doc.font("Helvetica").fontSize(8);
-//     doc.text(doctor1RegNo ? `Reg. No.: ${doctor1RegNo}` : "", 36, y);
-//     doc.text(
-//       doctor2RegNo ? `Reg. No.: ${doctor2RegNo}` : "",
-//       pageWidth / 2,
-//       y,
-//       {
-//         align: "right",
-//         width: usableWidth / 2,
-//       }
-//     );
-
-//     y += 16;
-
-//     // TITLE BAR
-//     doc
-//       .save()
-//       .rect(36, y, usableWidth, 18)
-//       .fill("#F3F3F3")
-//       .restore()
-//       .rect(36, y, usableWidth, 18)
-//       .stroke();
-
-//     doc.font("Helvetica-Bold").fontSize(10).text("REFUND RECEIPT", 36, y + 4, {
-//       align: "center",
-//       width: usableWidth,
-//     });
-
-//     y += 26;
-
-//     // COMMON LAYOUT
-//     const leftX = 36;
-//     const rightBoxWidth = 180;
-//     const rightX = pageWidth - 36 - rightBoxWidth;
-
-//     doc.font("Helvetica").fontSize(9);
-//     doc.text(`Refund No.: ${refundNo}`, leftX, y);
-//     doc.text(`Date: ${formatDateDot(refund.refundDate || "")}`, rightX, y, {
-//       width: rightBoxWidth,
-//       align: "right",
-//     });
-
-//     y += 16;
-
-//     const detailsTopY = y;
-//     const leftWidth = rightX - leftX - 10;
-
-//     doc
-//       .font("Helvetica-Bold")
-//       .text(`Patient Name: ${patientName}`, leftX, detailsTopY, {
-//         width: leftWidth,
-//       });
-//     doc.font("Helvetica").text(`Address: ${address}`, leftX, doc.y + 3, {
-//       width: leftWidth,
-//     });
-
-//     let detailsY = doc.y + 4;
-//     doc.font("Helvetica");
-
-//     const addDetailR = (label, value) => {
-//       if (!value) return;
-//       doc.text(`${label} ${value}`, leftX, detailsY, { width: leftWidth });
-//       detailsY = doc.y + 3;
-//     };
-
-//     addDetailR("Amount Refunded: Rs", formatMoney(refund.amount));
-//     addDetailR("Refund Mode:", mode);
-//     addDetailR("Reference No.:", referenceNo);
-//     addDetailR("Drawn On:", drawnOn);
-//     addDetailR("Drawn As:", drawnAs);
-//     addDetailR("Cheque No.:", chequeNumber);
-//     addDetailR("Cheque Date:", formatDateDot(chequeDate));
-//     addDetailR("Bank:", bankName);
-//     addDetailR("Transfer Type:", transferType);
-//     addDetailR("Transfer Date:", formatDateDot(transferDate));
-//     addDetailR("UPI ID:", upiId);
-//     addDetailR("UPI Name:", upiName);
-//     addDetailR("UPI Date:", formatDateDot(upiDate));
-
-//     // RIGHT BILL SUMMARY
-//     const boxY = detailsTopY;
-//     const lineH = 12;
-//     const boxHeight = 100;
-
-//     doc.rect(rightX, boxY, rightBoxWidth, boxHeight).stroke();
-
-//     let by2 = boxY + 4;
-//     doc.font("Helvetica-Bold").fontSize(9).text("Bill Summary", rightX + 6, by2);
-//     by2 += lineH + 2;
-//     doc.font("Helvetica").fontSize(9);
-
-//     const billNoText2 = bill.invoiceNo || billId;
-
-//     const addRow2 = (label, value) => {
-//       doc.text(label, rightX + 6, by2);
-//       doc.text(value, rightX + 6, by2, {
-//         width: rightBoxWidth - 12,
-//         align: "right",
-//       });
-//       by2 += lineH;
-//     };
-
-//     addRow2("Bill No.:", billNoText2);
-//     addRow2("Bill Date:", formatDateDot(bill.date || ""));
-//     addRow2("Bill Total:", `Rs ${formatMoney(billTotal)}`);
-//     addRow2("Total Paid:", `Rs ${formatMoney(netPaidTillThis)}`);
-//     addRow2("Refunded (incl. this):", `Rs ${formatMoney(refund.amount)}`);
-//     addRow2("Balance:", `Rs ${formatMoney(balanceAfterThis)}`); // ✅ NOW USES UPDATED BALANCE
-
-//     // FOOTNOTE + SIGNATURES
-//     y = Math.max(detailsY + 6, boxY + boxHeight + 6);
-
-//     doc
-//       .font("Helvetica")
-//       .fontSize(8)
-//       .text("* Dispute if any subject to Jamshedpur Jurisdiction", leftX, y, {
-//         width: usableWidth,
-//       });
-
-//     const sigY = y + 24;
-//     const sigWidth = 160;
-
-//     const rightSigX = pageWidth - 36 - sigWidth;
-//     doc
-//       .moveTo(rightSigX, sigY)
-//       .lineTo(rightSigX + sigWidth, sigY)
-//       .dash(1, { space: 2 })
-//       .stroke()
-//       .undash();
-//     doc.fontSize(8).text(clinicRepresentative || "", rightSigX, sigY + 4, {
-//       width: sigWidth,
-//       align: "center",
-//     });
-
-//     doc.end();
-//   } catch (err) {
-//     console.error("refund-html-pdf error:", err);
-//     if (!res.headersSent) {
-//       res.status(500).json({ error: "Failed to generate refund PDF" });
-//     }
-//   }
-// });
-
 app.get("/api/refunds/:id/refund-html-pdf", async (req, res) => {
   const id = req.params.id;
   if (!id) return res.status(400).json({ error: "Invalid refund id" });
@@ -2793,7 +2122,7 @@ app.get("/api/refunds/:id/refund-html-pdf", async (req, res) => {
         amount: Number(d.amount || 0),
         date: new Date(
           d.paymentDateTime ||
-            (d.paymentDate ? `${d.paymentDate}T00:00:00.000Z` : 0)
+            (d.paymentDate ? `${d.paymentDate}T00:00:00.000Z` : 0),
         ),
       };
     });
@@ -2814,7 +2143,7 @@ app.get("/api/refunds/:id/refund-html-pdf", async (req, res) => {
           amount: Number(d.amount || 0),
           date: new Date(
             d.refundDateTime ||
-              (d.refundDate ? `${d.refundDate}T00:00:00.000Z` : 0)
+              (d.refundDate ? `${d.refundDate}T00:00:00.000Z` : 0),
           ),
         };
       })
@@ -2829,10 +2158,10 @@ app.get("/api/refunds/:id/refund-html-pdf", async (req, res) => {
 
     // ---------- FINAL NUMBERS ----------
     const netPaidTillThis = totalPaidGross - refundedTillThis;
-    
+
     // 🔥 BUSINESS OVERRIDE: Procedure done = balance ZERO
-    const balanceAfterThis = isProcedureCompleted 
-      ? 0 
+    const balanceAfterThis = isProcedureCompleted
+      ? 0
       : Math.max(0, billTotal - netPaidTillThis);
 
     // ---------- HELPERS ----------
@@ -2872,10 +2201,7 @@ app.get("/api/refunds/:id/refund-html-pdf", async (req, res) => {
 
     // ---------- PDF HEADERS ----------
     res.setHeader("Content-Type", "application/pdf");
-    res.setHeader(
-      "Content-Disposition",
-      `inline; filename="refund-${id}.pdf"`
-    );
+    res.setHeader("Content-Disposition", `inline; filename="refund-${id}.pdf"`);
 
     const doc = new PDFDocument({
       size: "A4",
@@ -2924,12 +2250,15 @@ app.get("/api/refunds/:id/refund-html-pdf", async (req, res) => {
         {
           align: "center",
           width: pageWidth,
-        }
+        },
       );
 
     y += 48;
 
-    doc.moveTo(36, y).lineTo(pageWidth - 36, y).stroke();
+    doc
+      .moveTo(36, y)
+      .lineTo(pageWidth - 36, y)
+      .stroke();
     y += 6;
 
     // DOCTOR LINE
@@ -2950,7 +2279,7 @@ app.get("/api/refunds/:id/refund-html-pdf", async (req, res) => {
       {
         align: "right",
         width: usableWidth / 2,
-      }
+      },
     );
 
     y += 16;
@@ -2964,10 +2293,13 @@ app.get("/api/refunds/:id/refund-html-pdf", async (req, res) => {
       .rect(36, y, usableWidth, 18)
       .stroke();
 
-    doc.font("Helvetica-Bold").fontSize(10).text("REFUND RECEIPT", 36, y + 4, {
-      align: "center",
-      width: usableWidth,
-    });
+    doc
+      .font("Helvetica-Bold")
+      .fontSize(10)
+      .text("REFUND RECEIPT", 36, y + 4, {
+        align: "center",
+        width: usableWidth,
+      });
 
     y += 26;
 
@@ -3028,7 +2360,10 @@ app.get("/api/refunds/:id/refund-html-pdf", async (req, res) => {
     doc.rect(rightX, boxY, rightBoxWidth, boxHeight).stroke();
 
     let by2 = boxY + 4;
-    doc.font("Helvetica-Bold").fontSize(9).text("Bill Summary", rightX + 6, by2);
+    doc
+      .font("Helvetica-Bold")
+      .fontSize(9)
+      .text("Bill Summary", rightX + 6, by2);
     by2 += lineH + 2;
     doc.font("Helvetica").fontSize(9);
 
@@ -3083,7 +2418,6 @@ app.get("/api/refunds/:id/refund-html-pdf", async (req, res) => {
     }
   }
 });
-
 
 app.get("/api/bills/:id/full-payment-pdf", async (req, res) => {
   const id = req.params.id;
@@ -3211,7 +2545,7 @@ app.get("/api/bills/:id/full-payment-pdf", async (req, res) => {
     // });
 
     // Combine payments and refunds, then sort chronologically
-    
+
     const refunds = refundsSnap.docs.map((d) => {
       const rd = d.data();
       return {
@@ -3235,10 +2569,10 @@ app.get("/api/bills/:id/full-payment-pdf", async (req, res) => {
         upiName: rd.upiName || null,
         upiId: rd.upiId || null,
         upiDate: rd.upiDate || null,
-        receiptNo: (rd.refundNo || d.id).replace(/_/g, '/'),
+        receiptNo: (rd.refundNo || d.id).replace(/_/g, "/"),
       };
     });
-    
+
     const allTransactions = [...payments, ...refunds];
     allTransactions.sort((a, b) => {
       const da = a.paymentDateTime ? new Date(a.paymentDateTime) : new Date(0);
@@ -3248,15 +2582,15 @@ app.get("/api/bills/:id/full-payment-pdf", async (req, res) => {
 
     // totals
     const total = Number(
-      bill.total || items.reduce((s, it) => s + Number(it.amount || 0), 0)
+      bill.total || items.reduce((s, it) => s + Number(it.amount || 0), 0),
     );
     const totalPaidGross = payments.reduce(
       (s, p) => s + Number(p.amount || 0),
-      0
+      0,
     );
     const totalRefunded = refunds.reduce(
       (s, r) => s + Number(r.amount || 0),
-      0
+      0,
     );
     const netPaid = totalPaidGross - totalRefunded;
     const balance = total - netPaid;
@@ -3281,7 +2615,7 @@ app.get("/api/bills/:id/full-payment-pdf", async (req, res) => {
     const doctor2RegNo = profileValue(profile, "doctor2RegNo");
     const patientRepresentative = profileValue(
       profile,
-      "patientRepresentative"
+      "patientRepresentative",
     );
     const clinicRepresentative = profileValue(profile, "clinicRepresentative");
 
@@ -3289,7 +2623,7 @@ app.get("/api/bills/:id/full-payment-pdf", async (req, res) => {
     res.setHeader("Content-Type", "application/pdf");
     res.setHeader(
       "Content-Disposition",
-      `inline; filename="full-payment-${id}.pdf"`
+      `inline; filename="full-payment-${id}.pdf"`,
     );
 
     const doc = new PDFDocument({ size: "A4", margin: 0 });
@@ -3328,7 +2662,7 @@ app.get("/api/bills/:id/full-payment-pdf", async (req, res) => {
             pageMargin,
             pageMargin,
             pw - pageMargin * 2,
-            ph - pageMargin * 2
+            ph - pageMargin * 2,
           )
           .stroke();
         doc.restore();
@@ -3342,7 +2676,7 @@ app.get("/api/bills/:id/full-payment-pdf", async (req, res) => {
       const workSansPath = path.join(
         __dirname,
         "resources",
-        "WorkSans-Regular.ttf"
+        "WorkSans-Regular.ttf",
       );
       if (fs && fs.existsSync(workSansPath)) {
         doc.registerFont("WorkSans", workSansPath);
@@ -3405,7 +2739,7 @@ app.get("/api/bills/:id/full-payment-pdf", async (req, res) => {
         `PAN : ${clinicPAN || ""}   |   Reg. No: ${clinicRegNo || ""}`,
         contentLeft,
         y + 40,
-        { width: usableWidth, align: "center" }
+        { width: usableWidth, align: "center" },
       );
 
       y += 56;
@@ -3442,8 +2776,35 @@ app.get("/api/bills/:id/full-payment-pdf", async (req, res) => {
     });
     y += 28;
 
+    // const invoiceNo = bill.invoiceNo || id;
+    // const dateText = formatDateOnly(bill.date || "");
+    // doc.fontSize(9).font("Helvetica-Bold");
+    // doc.text(`Invoice No.: ${invoiceNo}`, contentLeft, y);
+    // doc.text(`Date: ${dateText}`, contentLeft, y, {
+    //   width: usableWidth,
+    //   align: "right",
+    // });
+    // y += 14;
+
     const invoiceNo = bill.invoiceNo || id;
-    const dateText = formatDateOnly(bill.date || "");
+
+    // ✅ NEW: Get last payment date (latest chronologically)
+    const lastPayment = allTransactions
+      .filter((t) => t.type === "Payment")
+      .sort((a, b) => {
+        const da = a.paymentDateTime
+          ? new Date(a.paymentDateTime)
+          : new Date(0);
+        const db = b.paymentDateTime
+          ? new Date(b.paymentDateTime)
+          : new Date(0);
+        return db - da; // DESC order (latest first)
+      })[0];
+
+    const dateText = lastPayment
+      ? formatDateOnly(lastPayment.paymentDate || bill.date)
+      : formatDateOnly(bill.date || "");
+
     doc.fontSize(9).font("Helvetica-Bold");
     doc.text(`Invoice No.: ${invoiceNo}`, contentLeft, y);
     doc.text(`Date: ${dateText}`, contentLeft, y, {
@@ -3465,7 +2826,7 @@ app.get("/api/bills/:id/full-payment-pdf", async (req, res) => {
       .text(`Patient Name: ${patientName}`, contentLeft, y);
     y += 14;
 
-    doc.font("Helvetica");
+    doc.font("Helvetica-Bold");
     if (sexText) {
       doc.text(
         `Address: ${addressText || "____________________"}`,
@@ -3473,7 +2834,7 @@ app.get("/api/bills/:id/full-payment-pdf", async (req, res) => {
         y,
         {
           width: usableWidth * 0.6,
-        }
+        },
       );
       y += 20;
     } else {
@@ -3483,7 +2844,7 @@ app.get("/api/bills/:id/full-payment-pdf", async (req, res) => {
         y,
         {
           width: usableWidth,
-        }
+        },
       );
       y += 20;
     }
@@ -3491,11 +2852,11 @@ app.get("/api/bills/:id/full-payment-pdf", async (req, res) => {
     // Procedure Done
     doc
       .fontSize(9)
-      .font("Helvetica")
+      .font("Helvetica-Bold")
       .text(
         `Procedure Done :- ${procedureText || "____________________"}`,
         contentLeft,
-        y
+        y,
       );
 
     y += 14;
@@ -3541,7 +2902,7 @@ app.get("/api/bills/:id/full-payment-pdf", async (req, res) => {
       .restore();
     doc.font("Helvetica-Bold").fontSize(9);
     const headerTextYOffset = headerPadding + 3;
-    doc.text("Sr.", colSrX , y + headerTextYOffset, {
+    doc.text("Sr.", colSrX, y + headerTextYOffset, {
       width: colSrW,
       align: "center",
     });
@@ -3549,11 +2910,9 @@ app.get("/api/bills/:id/full-payment-pdf", async (req, res) => {
       "Description of Items / Services",
       colServiceX + 4,
       y + headerTextYOffset,
-      { width: colServiceW - 8,
-        align: "center"
-       }
+      { width: colServiceW - 8, align: "center" },
     );
-    doc.text("Qty", colQtyX, y + headerTextYOffset,{
+    doc.text("Qty", colQtyX, y + headerTextYOffset, {
       width: colQtyW,
       align: "center",
     });
@@ -3632,7 +2991,7 @@ app.get("/api/bills/:id/full-payment-pdf", async (req, res) => {
           "Description of Items / Services",
           colServiceX + 4,
           y + headerTextYOffset,
-          { width: colServiceW - 8 }
+          { width: colServiceW - 8 },
         );
         doc.text("Qty", colQtyX + 4, y + headerTextYOffset);
         doc.text("Rate", colRateX + 4, y + headerTextYOffset, {
@@ -3663,7 +3022,7 @@ app.get("/api/bills/:id/full-payment-pdf", async (req, res) => {
       });
       const actualRowH = Math.max(
         minRowH,
-        Math.max(descH2, qtyH2, rateH2, amtH2) + 6
+        Math.max(descH2, qtyH2, rateH2, amtH2) + 6,
       );
 
       const rowTop = y;
@@ -3680,7 +3039,7 @@ app.get("/api/bills/:id/full-payment-pdf", async (req, res) => {
         String(it.qty != null && it.qty !== "" ? it.qty : ""),
         colQtyX + 4,
         qtyY,
-        { width: colQtyW - 8, align: "left" }
+        { width: colQtyW - 8, align: "left" },
       );
       doc.text(formatMoney(it.rate || 0), colRateX + 4, rateY, {
         width: colRateW - 8,
@@ -3704,14 +3063,14 @@ app.get("/api/bills/:id/full-payment-pdf", async (req, res) => {
         if (y + minRowH > doc.page.height - bottomSafety) {
           drawVerticalsForItemsBlock(
             tableStartY,
-            headerDrawH + totalTableHeight
+            headerDrawH + totalTableHeight,
           );
           doc
             .rect(
               tableLeft,
               tableStartY,
               usableWidth,
-              headerDrawH + totalTableHeight
+              headerDrawH + totalTableHeight,
             )
             .stroke();
 
@@ -3745,7 +3104,7 @@ app.get("/api/bills/:id/full-payment-pdf", async (req, res) => {
             "Description of Items / Services",
             colServiceX + 4,
             y + headerTextYOffset,
-            { width: colServiceW - 8 }
+            { width: colServiceW - 8 },
           );
           doc.text("Qty", colQtyX + 4, y + headerTextYOffset);
           doc.text("Rate", colRateX + 4, y + headerTextYOffset, {
@@ -3888,7 +3247,7 @@ app.get("/api/bills/:id/full-payment-pdf", async (req, res) => {
       width: pColTypeW - 4,
       align: "center",
     });
-    doc.text("Mode", pColModeX , y + pHeaderTextYOffset, {
+    doc.text("Mode", pColModeX, y + pHeaderTextYOffset, {
       width: pColModeW - 4,
       align: "center",
     });
@@ -3896,14 +3255,13 @@ app.get("/api/bills/:id/full-payment-pdf", async (req, res) => {
       width: pColBankW - 4,
       align: "center",
     });
-    doc.text("Cheque No./UTR No./REF No.", pColRefX , y + pHeaderTextYOffset, {
+    doc.text("Cheque No./UTR No./REF No.", pColRefX, y + pHeaderTextYOffset, {
       width: pColRefW - 4,
       align: "center",
     });
     doc.text("Amount", pColAmtX + 4, y + pHeaderTextYOffset, {
       width: pColAmtW - 4,
       align: "center",
-
     });
 
     y += pHeaderDrawH;
@@ -3918,7 +3276,7 @@ app.get("/api/bills/:id/full-payment-pdf", async (req, res) => {
       const dateText = formatDateOnly(p.paymentDate || "");
       const receiptText = p.receiptNo || p.id || "";
       const typeText = p.type || "Payment";
-      
+
       let modeText = p.mode || "-";
       if (
         (modeText === "BankTransfer" ||
@@ -3927,7 +3285,7 @@ app.get("/api/bills/:id/full-payment-pdf", async (req, res) => {
       ) {
         modeText = `Bank (${p.transferType})`;
       }
-      
+
       let bankText = "-";
       let refText = "-";
 
@@ -3959,13 +3317,16 @@ app.get("/api/bills/:id/full-payment-pdf", async (req, res) => {
       if (y + thisRowH > doc.page.height - pBottomSafety) {
         const paymentsVisualHeightSoFar = pHeaderDrawH + pFilledHeight;
         if (paymentsVisualHeightSoFar > 0) {
-          drawVerticalsForPaymentsBlock(pTableStartY, paymentsVisualHeightSoFar);
+          drawVerticalsForPaymentsBlock(
+            pTableStartY,
+            paymentsVisualHeightSoFar,
+          );
           doc
             .rect(
               pTableLeft,
               pTableStartY,
               usableWidth,
-              paymentsVisualHeightSoFar
+              paymentsVisualHeightSoFar,
             )
             .stroke();
         }
@@ -4000,9 +3361,14 @@ app.get("/api/bills/:id/full-payment-pdf", async (req, res) => {
         doc.text("Bank Name / UPI ID", pColBankX + 4, y + pHeaderTextYOffset, {
           width: pColBankW - 8,
         });
-        doc.text("Cheque No./UTR No./REF No.", pColRefX + 4, y + pHeaderTextYOffset, {
-          width: pColRefW - 8,
-        });
+        doc.text(
+          "Cheque No./UTR No./REF No.",
+          pColRefX + 4,
+          y + pHeaderTextYOffset,
+          {
+            width: pColRefW - 8,
+          },
+        );
         doc.text("Amount", pColAmtX + 4, y + pHeaderTextYOffset, {
           width: pColAmtW - 8,
           align: "right",
@@ -4060,14 +3426,14 @@ app.get("/api/bills/:id/full-payment-pdf", async (req, res) => {
           if (paymentsVisualHeightSoFar > 0) {
             drawVerticalsForPaymentsBlock(
               pTableStartY,
-              paymentsVisualHeightSoFar
+              paymentsVisualHeightSoFar,
             );
             doc
               .rect(
                 pTableLeft,
                 pTableStartY,
                 usableWidth,
-                paymentsVisualHeightSoFar
+                paymentsVisualHeightSoFar,
               )
               .stroke();
           }
@@ -4088,21 +3454,36 @@ app.get("/api/bills/:id/full-payment-pdf", async (req, res) => {
           doc.text("Date", pColDateX + 4, y + pHeaderTextYOffset, {
             width: pColDateW - 8,
           });
-          doc.text("Receipt / Refund No.", pColRecX + 4, y + pHeaderTextYOffset, {
-            width: pColRecW - 8,
-          });
+          doc.text(
+            "Receipt / Refund No.",
+            pColRecX + 4,
+            y + pHeaderTextYOffset,
+            {
+              width: pColRecW - 8,
+            },
+          );
           doc.text("Type", pColTypeX + 4, y + pHeaderTextYOffset, {
             width: pColTypeW - 8,
           });
           doc.text("Mode", pColModeX + 4, y + pHeaderTextYOffset, {
             width: pColModeW - 8,
           });
-          doc.text("Bank Name / UPI ID", pColBankX + 4, y + pHeaderTextYOffset, {
-            width: pColBankW - 8,
-          });
-          doc.text("Cheque No./UTR No./REF No.", pColRefX + 4, y + pHeaderTextYOffset, {
-            width: pColRefW - 8,
-          });
+          doc.text(
+            "Bank Name / UPI ID",
+            pColBankX + 4,
+            y + pHeaderTextYOffset,
+            {
+              width: pColBankW - 8,
+            },
+          );
+          doc.text(
+            "Cheque No./UTR No./REF No.",
+            pColRefX + 4,
+            y + pHeaderTextYOffset,
+            {
+              width: pColRefW - 8,
+            },
+          );
           doc.text("Amount", pColAmtX + 4, y + pHeaderTextYOffset, {
             width: pColAmtW - 8,
             align: "right",
@@ -4132,37 +3513,89 @@ app.get("/api/bills/:id/full-payment-pdf", async (req, res) => {
     // Function to convert number to words
     function numberToWords(num) {
       if (num === 0) return "Zero";
-      
-      const ones = ["", "One", "Two", "Three", "Four", "Five", "Six", "Seven", "Eight", "Nine"];
-      const tens = ["", "", "Twenty", "Thirty", "Forty", "Fifty", "Sixty", "Seventy", "Eighty", "Ninety"];
-      const teens = ["Ten", "Eleven", "Twelve", "Thirteen", "Fourteen", "Fifteen", "Sixteen", "Seventeen", "Eighteen", "Nineteen"];
-      
+
+      const ones = [
+        "",
+        "One",
+        "Two",
+        "Three",
+        "Four",
+        "Five",
+        "Six",
+        "Seven",
+        "Eight",
+        "Nine",
+      ];
+      const tens = [
+        "",
+        "",
+        "Twenty",
+        "Thirty",
+        "Forty",
+        "Fifty",
+        "Sixty",
+        "Seventy",
+        "Eighty",
+        "Ninety",
+      ];
+      const teens = [
+        "Ten",
+        "Eleven",
+        "Twelve",
+        "Thirteen",
+        "Fourteen",
+        "Fifteen",
+        "Sixteen",
+        "Seventeen",
+        "Eighteen",
+        "Nineteen",
+      ];
+
       function convertLessThanThousand(n) {
         if (n === 0) return "";
         if (n < 10) return ones[n];
         if (n < 20) return teens[n - 10];
-        if (n < 100) return tens[Math.floor(n / 10)] + (n % 10 !== 0 ? " " + ones[n % 10] : "");
-        return ones[Math.floor(n / 100)] + " Hundred" + (n % 100 !== 0 ? " " + convertLessThanThousand(n % 100) : "");
+        if (n < 100)
+          return (
+            tens[Math.floor(n / 10)] + (n % 10 !== 0 ? " " + ones[n % 10] : "")
+          );
+        return (
+          ones[Math.floor(n / 100)] +
+          " Hundred" +
+          (n % 100 !== 0 ? " " + convertLessThanThousand(n % 100) : "")
+        );
       }
-      
+
       if (num < 1000) return convertLessThanThousand(num);
       if (num < 100000) {
         const thousands = Math.floor(num / 1000);
         const remainder = num % 1000;
-        return convertLessThanThousand(thousands) + " Thousand" + (remainder !== 0 ? " " + convertLessThanThousand(remainder) : "");
+        return (
+          convertLessThanThousand(thousands) +
+          " Thousand" +
+          (remainder !== 0 ? " " + convertLessThanThousand(remainder) : "")
+        );
       }
       if (num < 10000000) {
         const lakhs = Math.floor(num / 100000);
         const remainder = num % 100000;
-        return convertLessThanThousand(lakhs) + " Lakh" + (remainder !== 0 ? " " + numberToWords(remainder) : "");
+        return (
+          convertLessThanThousand(lakhs) +
+          " Lakh" +
+          (remainder !== 0 ? " " + numberToWords(remainder) : "")
+        );
       }
       const crores = Math.floor(num / 10000000);
       const remainder = num % 10000000;
-      return convertLessThanThousand(crores) + " Crore" + (remainder !== 0 ? " " + numberToWords(remainder) : "");
+      return (
+        convertLessThanThousand(crores) +
+        " Crore" +
+        (remainder !== 0 ? " " + numberToWords(remainder) : "")
+      );
     }
-    
+
     const amountInWords = numberToWords(Math.floor(netPaid)) + " Rupees Only";
-    
+
     // Add amount in words
     doc
       .fontSize(9)
@@ -4198,7 +3631,7 @@ app.get("/api/bills/:id/full-payment-pdf", async (req, res) => {
         computeContentArea());
       y = contentTop;
       drawPageHeader();
-      
+
       // Re-add amount in words on new page
       doc
         .fontSize(9)
@@ -4207,7 +3640,7 @@ app.get("/api/bills/:id/full-payment-pdf", async (req, res) => {
           width: usableWidth,
         });
       y += 18;
-      
+
       doc
         .fontSize(8)
         .font("Helvetica")
@@ -4505,11 +3938,15 @@ app.get("/api/bills/:id/invoice-html-pdf", async (req, res) => {
       });
 
     // primaryPayment = first (earliest) payment (explicit)
-    const primaryPayment = payments.length > 0 ? payments[0] : null;
+    //const primaryPayment = payments.length > 0 ? payments[0] : null;
+
+    // primaryPayment = last (latest) payment
+    const primaryPayment =
+      payments.length > 0 ? payments[payments.length - 1] : null;
 
     const totalPaidGross = payments.reduce(
       (sum, p) => sum + Number(p.amount || 0),
-      0
+      0,
     );
 
     // 5) REFUNDS (still used for math but not printed as a separate line)
@@ -4582,7 +4019,7 @@ app.get("/api/bills/:id/invoice-html-pdf", async (req, res) => {
     const doctor2RegNo = profileValue(profile, "doctor2RegNo");
     const patientRepresentative = profileValue(
       profile,
-      "patientRepresentative"
+      "patientRepresentative",
     );
     const clinicRepresentative = profileValue(profile, "clinicRepresentative");
 
@@ -4590,7 +4027,7 @@ app.get("/api/bills/:id/invoice-html-pdf", async (req, res) => {
     res.setHeader("Content-Type", "application/pdf");
     res.setHeader(
       "Content-Disposition",
-      `inline; filename="invoice-${id}.pdf"`
+      `inline; filename="invoice-${id}.pdf"`,
     );
 
     const doc = new PDFDocument({
@@ -4644,7 +4081,7 @@ app.get("/api/bills/:id/invoice-html-pdf", async (req, res) => {
         {
           align: "center",
           width: pageWidth,
-        }
+        },
       );
 
     y += 60;
@@ -4674,7 +4111,7 @@ app.get("/api/bills/:id/invoice-html-pdf", async (req, res) => {
       {
         align: "right",
         width: usableWidth / 2,
-      }
+      },
     );
 
     y += 18;
@@ -4788,7 +4225,7 @@ app.get("/api/bills/:id/invoice-html-pdf", async (req, res) => {
       headerTopY + 6,
       {
         width: colServiceW - 4,
-      }
+      },
     );
     doc.text("Qty", colQtyX + 2, headerTopY + 6);
     doc.text("Rate", colRateX + 2, headerTopY + 6, {
@@ -4877,7 +4314,7 @@ app.get("/api/bills/:id/invoice-html-pdf", async (req, res) => {
           "Description of Items / Services",
           colServiceX + 2,
           headerTopY2 + 6,
-          { width: colServiceW - 4 }
+          { width: colServiceW - 4 },
         );
         doc.text("Qty", colQtyX + 2, headerTopY2 + 6);
         doc.text("Rate", colRateX + 2, headerTopY2 + 6, {
@@ -4908,7 +4345,7 @@ app.get("/api/bills/:id/invoice-html-pdf", async (req, res) => {
       doc.text(
         item.qty != null && item.qty !== "" ? String(item.qty) : "",
         colQtyX + 2,
-        y + 6
+        y + 6,
       );
       doc.text(formatMoney(item.rate || 0), colRateX + 2, y + 6, {
         width: colRateW - 4,
@@ -4988,7 +4425,7 @@ app.get("/api/bills/:id/invoice-html-pdf", async (req, res) => {
             "Description of Items / Services",
             colServiceX + 2,
             headerTopY3 + 6,
-            { width: colServiceW - 4 }
+            { width: colServiceW - 4 },
           );
           doc.text("Qty", colQtyX + 2, headerTopY3 + 6);
           doc.text("Rate", colRateX + 2, headerTopY3 + 6, {
@@ -5177,7 +4614,7 @@ app.get("/api/bills/:id/summary-pdf", async (req, res) => {
     });
     const totalPaidGross = payments.reduce(
       (sum, p) => sum + Number(p.amount || 0),
-      0
+      0,
     );
     // --- REFUNDS ---
     const refundsSnap = await db
@@ -5205,7 +4642,7 @@ app.get("/api/bills/:id/summary-pdf", async (req, res) => {
     });
     const totalRefunded = refunds.reduce(
       (sum, r) => sum + Number(r.amount || 0),
-      0
+      0,
     );
     const netPaid = totalPaidGross - totalRefunded;
     const balance = billTotal - netPaid;
@@ -5286,14 +4723,14 @@ app.get("/api/bills/:id/summary-pdf", async (req, res) => {
     const doctor2RegNo = profileValue(profile, "doctor2RegNo");
     const patientRepresentative = profileValue(
       profile,
-      "patientRepresentative"
+      "patientRepresentative",
     );
     const clinicRepresentative = profileValue(profile, "clinicRepresentative");
     // ---------- PDF START ----------
     res.setHeader("Content-Type", "application/pdf");
     res.setHeader(
       "Content-Disposition",
-      `inline; filename="bill-summary-${billId}.pdf"`
+      `inline; filename="bill-summary-${billId}.pdf"`,
     );
     const doc = new PDFDocument({
       size: "A4",
@@ -5334,7 +4771,7 @@ app.get("/api/bills/:id/summary-pdf", async (req, res) => {
         {
           align: "center",
           width: pageWidth,
-        }
+        },
       );
     y += 48;
     doc
@@ -5359,7 +4796,7 @@ app.get("/api/bills/:id/summary-pdf", async (req, res) => {
       {
         align: "right",
         width: usableWidth / 2,
-      }
+      },
     );
     y += 16;
     // title bar
@@ -5390,13 +4827,13 @@ app.get("/api/bills/:id/summary-pdf", async (req, res) => {
       {
         align: "right",
         width: usableWidth / 2,
-      }
+      },
     );
     y += 12;
     doc.text(`Patient Name: ${patientName}`, 36, y, {
       width: usableWidth,
     });
-    doc.font("Helvetica").text(`Address: ${address}`, 36, doc.y + 3, {
+    doc.font("Helvetica-Bold").text(`Address: ${address}`, 36, doc.y + 3, {
       width: usableWidth,
     });
     y += 28;
@@ -5516,10 +4953,10 @@ app.get("/api/bills/:id/summary-pdf", async (req, res) => {
           formatMoney(
             ev.type === "INVOICE"
               ? ev.debit - ev.credit
-              : runningBalance + ev.debit - ev.credit
-          )
+              : runningBalance + ev.debit - ev.credit,
+          ),
         ),
-        { width: colBalW - 8 }
+        { width: colBalW - 8 },
       );
       const contentMaxH = Math.max(
         dateH,
@@ -5528,7 +4965,7 @@ app.get("/api/bills/:id/summary-pdf", async (req, res) => {
         refH,
         debitH,
         creditH,
-        balH
+        balH,
       );
       let rowH = Math.max(minRowHeight, contentMaxH + padding);
 
@@ -5625,7 +5062,7 @@ app.get("/api/bills/:id/summary-pdf", async (req, res) => {
         ev.credit ? formatMoney(ev.credit) : "",
         colCreditX + 4,
         cellTop,
-        { width: colCreditW - 8, align: "right" }
+        { width: colCreditW - 8, align: "right" },
       );
       doc.text(formatMoney(runningBalance), colBalX + 4, cellTop, {
         width: colBalW - 8,
@@ -5789,8 +5226,6 @@ app.get("/api/bills/:id/summary-pdf", async (req, res) => {
     }
   }
 });
-
-
 
 // ---------- START SERVER ----------
 app.listen(PORT, () => {
