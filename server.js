@@ -2463,7 +2463,7 @@ app.get("/api/transactions/download-pdf", async (req, res) => {
     doc.font("Helvetica-Bold").fontSize(8);
     doc.text("Date", colDateX + 4, y + 4, { width: colDateW - 8 });
     doc.text("Type", colTypeX + 4, y + 4, { width: colTypeW - 8 });
-    doc.text("Bill #", colBillX + 4, y + 4, { width: colBillW - 8 });
+    doc.text("Bill ID", colBillX + 4, y + 4, { width: colBillW - 8 });
     doc.text("Patient", colPatientX + 4, y + 4, { width: colPatientW - 8 });
     doc.text("Mode", colModeX + 4, y + 4, { width: colModeW - 8 });
     doc.text("Amount", colAmtX + 4, y + 4, { width: colAmtW - 8, align: "right" });
