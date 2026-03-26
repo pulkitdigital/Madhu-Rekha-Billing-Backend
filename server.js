@@ -6013,6 +6013,98 @@ app.get("/api/bills/:id/summary-pdf", async (req, res) => {
   }
 });
 
+
+// ---------- SERVICE ITEMS CACHE KEY ----------
+function serviceItemsCacheKey() {
+  return makeCacheKey("service-items", "all");
+}
+
+
+// ---------- GET /api/service-items ----------
+app.get("/api/service-items", async (_req, res) => {
+  try {
+    const key = serviceItemsCacheKey();
+    const data = await getOrSetCache(key, 300, async () => {
+      const snap = await db
+        .collection("serviceItems")
+        .orderBy("createdAt", "asc")
+        .get();
+
+      return snap.docs.map((doc) => ({
+        id: doc.id,
+        name: doc.data().name || "",
+        defaultRate: Number(doc.data().defaultRate || 0),
+        createdAt: doc.data().createdAt || "",
+      }));
+    });
+
+    res.json(data);
+  } catch (err) {
+    console.error("GET /api/service-items error:", err);
+    res.status(500).json({ error: "Failed to fetch service items" });
+  }
+});
+
+// ---------- POST /api/service-items ----------
+app.post("/api/service-items", async (req, res) => {
+  try {
+    const { name, defaultRate } = req.body;
+
+    if (!name || !String(name).trim()) {
+      return res.status(400).json({ error: "Item name is required" });
+    }
+
+    const createdAt = new Date().toISOString();
+    const itemData = {
+      name: String(name).trim(),
+      defaultRate: Number(defaultRate) || 0,
+      createdAt,
+    };
+
+    const docRef = await db.collection("serviceItems").add(itemData);
+
+    // clear cache so next GET is fresh
+    cache.del(serviceItemsCacheKey());
+
+    res.status(201).json({
+      item: {
+        id: docRef.id,
+        ...itemData,
+      },
+    });
+  } catch (err) {
+    console.error("POST /api/service-items error:", err);
+    res.status(500).json({ error: "Failed to add service item" });
+  }
+});
+
+// ---------- DELETE /api/service-items/:id ----------
+app.delete("/api/service-items/:id", async (req, res) => {
+  const id = req.params.id;
+  if (!id) return res.status(400).json({ error: "Invalid item id" });
+
+  try {
+    const ref = db.collection("serviceItems").doc(id);
+    const snap = await ref.get();
+
+    if (!snap.exists) {
+      return res.status(404).json({ error: "Service item not found" });
+    }
+
+    await ref.delete();
+
+    // clear cache
+    cache.del(serviceItemsCacheKey());
+
+    res.json({ success: true, id });
+  } catch (err) {
+    console.error("DELETE /api/service-items/:id error:", err);
+    res.status(500).json({ error: "Failed to delete service item" });
+  }
+});
+
+
+
 // ---------- START SERVER ----------
 app.listen(PORT, () => {
   console.log(`Backend running on http://localhost:${PORT}`);
