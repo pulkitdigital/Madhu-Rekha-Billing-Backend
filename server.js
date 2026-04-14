@@ -1769,6 +1769,7 @@ app.put("/api/bills/:id", async (req, res) => {
       remarks,
       services,
       procedureDone, // ✅ ADD
+      dateManuallySet,
     } = req.body;
 
     if (!date && !oldBill.date) {
@@ -1839,6 +1840,7 @@ app.put("/api/bills/:id", async (req, res) => {
       remarks:
         typeof remarks !== "undefined" ? remarks : (oldBill.remarks ?? null),
       services: normalizedServices,
+      dateManuallySet: dateManuallySet === true ? true : (oldBill.dateManuallySet || false), // ✅ ADD THIS
     });
 
     // 2) Replace items collection for this bill
@@ -3687,7 +3689,29 @@ app.get("/api/bills/:id/full-payment-pdf", async (req, res) => {
     //   ? formatDateOnly(lastPayment.paymentDate || bill.date)
     //   : formatDateOnly(bill.date || "");
 
-    const dateText = formatDateOnly(bill.date || "");
+    //const dateText = formatDateOnly(bill.date || "");
+
+    // const dateText = lastPayment
+    //   ? formatDateOnly(
+    //       lastPayment.upiDate ||
+    //         lastPayment.chequeDate ||
+    //         lastPayment.transferDate ||
+    //         lastPayment.paymentDate ||
+    //         bill.date ||
+    //         "",
+    //     )
+    //   : formatDateOnly(bill.date || "");
+    const dateText = bill.dateManuallySet
+  ? formatDateOnly(bill.date || "")           // ✅ User ne date change ki → bill.date aaye
+  : lastPayment
+    ? formatDateOnly(
+        lastPayment.upiDate ||
+        lastPayment.chequeDate ||
+        lastPayment.transferDate ||
+        lastPayment.paymentDate ||
+        bill.date || ""
+      )
+    : formatDateOnly(bill.date || ""); 
 
     doc.fontSize(9).font("Helvetica-Bold");
     doc.text(`Invoice No.: ${invoiceNo}`, contentLeft, y);
@@ -4157,7 +4181,10 @@ app.get("/api/bills/:id/full-payment-pdf", async (req, res) => {
     for (let i = 0; i < allTransactions.length; i++) {
       const p = allTransactions[i];
 
-      const dateText = formatDateOnly(p.paymentDate || "");
+      //const dateText = formatDateOnly(p.paymentDate || "");
+      const dateText = formatDateOnly(
+        p.upiDate || p.chequeDate || p.transferDate || p.paymentDate || "",
+      );
       const receiptText = p.receiptNo || p.id || "";
       const typeText = p.type || "Payment";
 
