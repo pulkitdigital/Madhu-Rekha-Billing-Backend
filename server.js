@@ -2083,12 +2083,6 @@ app.get("/api/transactions", async (_req, res) => {
   }
 });
 
-
-
-
-
-
-
 app.get("/api/transactions/download-pdf", async (req, res) => {
   const { type, from, to } = req.query;
 
@@ -2484,6 +2478,37 @@ app.get("/api/payments/:id/receipt-html-pdf", async (req, res) => {
         return da - dbb;
       });
 
+    // Existing payments query ke baad ye add karo
+    const refundsSnap = await db
+      .collection("refunds")
+      .where("billId", "==", billId)
+      .get();
+
+    const allRefunds = refundsSnap.docs.map((doc) => {
+      const d = doc.data();
+      const refundDateTime =
+        d.refundDateTime || (d.date ? `${d.date}T00:00:00.000Z` : null);
+      return {
+        id: doc.id,
+        refundDateTime,
+        amount: Number(d.amount || 0),
+      };
+    });
+
+    // Current payment ki datetime nikalo
+    const currentPayment = allPayments.find((p) => p.id === id);
+    const currentPaymentTime = currentPayment?.paymentDateTime
+      ? new Date(currentPayment.paymentDateTime)
+      : new Date(0);
+
+    // Sirf wahi refunds count karo jo is payment se pehle ya saath hue
+    const totalRefundedTillThis = allRefunds
+      .filter((r) => {
+        const rt = r.refundDateTime ? new Date(r.refundDateTime) : new Date(0);
+        return rt <= currentPaymentTime;
+      })
+      .reduce((sum, r) => sum + r.amount, 0);
+
     let cumulativePaid = 0;
     let paidTillThis = 0;
     let balanceAfterThis = billTotal;
@@ -2492,7 +2517,8 @@ app.get("/api/payments/:id/receipt-html-pdf", async (req, res) => {
       cumulativePaid += p.amount;
       if (p.id === id) {
         paidTillThis = cumulativePaid;
-        balanceAfterThis = billTotal - paidTillThis;
+        //balanceAfterThis = billTotal - paidTillThis;
+        balanceAfterThis = billTotal - paidTillThis + totalRefundedTillThis;
         break;
       }
     }
@@ -2647,7 +2673,15 @@ app.get("/api/payments/:id/receipt-html-pdf", async (req, res) => {
 
     doc.font("Helvetica").fontSize(9);
     doc.text(`Receipt No.: ${receiptNo}`, leftX, y);
-    doc.text(`Date: ${formatDateDot(payment.paymentDate || "")}`, rightX, y, {
+    const paymentDateStr =
+      payment.upiDate ||
+      payment.chequeDate ||
+      payment.transferDate ||
+      payment.paymentDate ||
+      (payment.paymentDateTime ? payment.paymentDateTime.split("T")[0] : "");
+
+    doc.text(`Date: ${formatDateDot(paymentDateStr)}`, rightX, y, {
+      //doc.text(`Date: ${formatDateDot(payment.paymentDate || "")}`, rightX, y, {
       width: rightBoxWidth,
       align: "right",
     });
@@ -2727,7 +2761,9 @@ app.get("/api/payments/:id/receipt-html-pdf", async (req, res) => {
     addRow("Bill No.:", billNoText);
     addRow("Bill Date:", formatDateDot(bill.date || ""));
     addRow("Bill Total:", `Rs ${formatMoney(billTotal)}`);
-    addRow("Paid Amount:", `Rs ${formatMoney(paidTillThis)}`);
+    const netPaidTillThis = paidTillThis - totalRefundedTillThis;
+    addRow("Paid Amount:", `Rs ${formatMoney(netPaidTillThis)}`);
+    //addRow("Paid Amount:", `Rs ${formatMoney(paidTillThis)}`);
     addRow("Balance:", `Rs ${formatMoney(balanceAfterThis)}`);
 
     // FOOTNOTE + SIGNATURES
@@ -4509,7 +4545,7 @@ app.get("/api/bills/:id/full-payment-pdf", async (req, res) => {
       by += lineH;
     };
 
-    addRow("Total Payable", total);
+    addRow("Total Payable", totalPaidGross);
     addRow("Refund", totalRefunded);
     addRow("Total Paid", netPaid);
 
